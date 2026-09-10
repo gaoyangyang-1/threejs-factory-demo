@@ -15,14 +15,15 @@ export default defineConfig({
       output: {
         manualChunks: {
           vue: ['vue', 'pinia'],
-          three: ['three'],
-          echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers']
+          three: ['three']
         }
       }
     }
   },
   server: {
     host: '0.0.0.0',
-    port: 5173
+    port: 5173,
+    // 放行 Cloudflare Quick Tunnel 等内网穿透域名，避免 Vite Host 校验 403
+    allowedHosts: ['.trycloudflare.com', '.lhr.life', '.localtunnel.me']
   }
 });

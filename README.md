@@ -1,329 +1,79 @@
-# Smart Factory Digital Twin
+# 飞机货运 AGV 智能运输数字孪生系统
 
-<p align="right">
-  <a href="#中文">中文</a> | <a href="#english">English</a>
-</p>
+基于 Vue 3 + TypeScript + Three.js 的浏览器端**飞机货舱 AGV 智能运输**数字孪生展示系统（由智慧工厂数字孪生项目二次开发）。围绕
+"货物进入飞机货舱 → AGV 自动取货 → 算法规划路径 → 货舱内自主运输 → 障碍物自动避让 → 抵达目标位置 → 货物自动排列放置 → AGV 完成任务"
+全流程进行三维实时渲染，参数可配置，并预留真实算法（路径规划/避障/调度/排列/强化学习）接入接口。不依赖真实 ROS/Gazebo 机器人仿真平台。
 
-<a id="中文"></a>
+技术方案与评审修订见 [`docs/方案.md`](./docs/方案.md)，算法对接细节见 [`docs/算法接入协议.md`](./docs/算法接入协议.md)。
 
-## 中文
+## 特性
 
-一个面向作品集展示的智慧工厂数字孪生前端项目。项目基于 Vue 3、TypeScript、Vite、Three.js、Element Plus 与 ECharts 构建，模拟工厂车间、AGV 巡航、IoT 设备状态、实时告警、数据大屏与 3D 交互联动。
+- **机体坐标硬约束**：机头原点 O(0,0,0)，+X 逆航向（机尾）、+Y 竖直向上、+Z 飞行方向左侧（左舷）；1 单位 = 1 m，与 three.js y-up 右手系同构，直接建模。
+- **货舱布局**：剖开式货舱（地板/侧壁/肋骨骨架/机头机尾隔板）；前、后货舱门位于右舷 -Z（含墙洞开口、轴向滑移门扇动画、门外装卸平台）；双排槽位格 + 编号 + 目标槽脉冲闪烁。
+- **三种标准货柜参数化**：AKE(LD-3) / PMX / PAX，主体 + 轮廓线框 + 托盘示意，尺寸集中定义、可 UI 修改即重建。
+- **AGV 转运模块**：外部指令（moveTo/turnTo/pick/place）增量驱动，位置插值 + 轮组转向示意 + 顶升平台取放 + 状态指示灯；多台 AGV 按前/后舱分工并行作业。
+- **演示编排源（MockScheduler）**：浏览器内按消息契约完整演示 单货物/多货物同时装载 流程——开舱门、平台生成货物、滑入舱内交接位、空驶取货、载货走廊运输、障碍检测与路径重规划绕行、目标列横移入位、任务完成复位。非算法实现，仅占位。
+- **算法接入接口（AlgorithmAdapter）**：WebSocket 同契约收发（帧编解码 + 断线退避重连），前端 UI 可切换消息源并配置地址。
+- **任务与状态面板**：参数控制面板（货舱/门/槽位/AGV/三种 ULD）；任务控制（单/多装载、货型、件数、目标槽选择）；任务列表、AGV 实时卡、舱位占用格、运行日志与 KPI；启停/暂停/重置/自动演示。
+- **场景重建与运维**：config 变更即整场景重建（几何 dispose 防泄漏）、ResizeObserver 自适应、会话重置、双击自动演示至货满。
 
-![Smart Factory Digital Twin Demo](./docs/images/factory-layout-1920.jpg)
-
-## 联系与商务合作
-
-如果你对本项目有任何疑问、改进建议，或希望进行数字孪生、Three.js 3D 可视化、工业大屏、前端工程化等相关商务合作，欢迎通过微信联系我。
-
-![WeChat Contact](./docs/images/wechat-contact.jpg)
-
-## 功能说明
-
-- 工厂车间数字孪生场景：包含 AGV 运输区、工业设备区、仓储区、机械臂区域、摄像头区域和数据看板区域。
-- Three.js 工业场景：使用 `WebGLRenderer`、`PerspectiveCamera`、`OrbitControls`、`EffectComposer`、`UnrealBloomPass` 和 FXAA 后期。
-- AGV 巡航系统：基于 `CatmullRomCurve3` 实现循环路径，使用 `Quaternion` 平滑转向，支持多 AGV、速度配置和状态机。
-- IoT 设备系统：设备支持 `running`、`warning`、`error`、`offline` 状态，不同状态拥有颜色、发光和告警脉冲表现。
-- 实时数据模拟：`WebSocketService` 模拟设备温度、功率、电量、告警、AGV 状态和实时日志推送。
-- 鼠标交互：基于 `Raycaster` 支持设备 hover、点击高亮和实时数据弹窗。
-- 数据大屏：使用 ECharts 展示设备在线率、AGV 数量、今日任务数、告警统计、电力消耗和温度趋势。
-- 性能优化：包含 `requestAnimationFrame` 渲染循环、`InstancedMesh`、Frustum Culling、DracoLoader、KTX2Loader、资源释放和自适应 Resize。
-
-## 技术栈
-
-- Vue 3
-- TypeScript
-- Vite
-- Three.js
-- Element Plus
-- ECharts
-- Pinia
-
-## 项目结构
-
-```text
-src/
-  assets/        全局样式与静态资源
-  components/    大屏布局、图表和 Three.js 视口组件
-  managers/      AGV、设备等业务对象管理器
-  scene/         Three.js 主场景编排
-  store/         Pinia 实时状态管理
-  three/         模型加载、缓存和释放能力
-  types/         工厂业务类型定义
-  utils/         时间、资源释放等工具函数
-  views/         页面级视图
-  websocket/     WebSocket 实时数据模拟服务
-public/
-  basis/         KTX2 / Basis 纹理解码器
-  draco/         Draco 模型解码器
-docs/
-  images/        README 演示截图
-```
-
-## 核心模块
-
-- `src/scene/FactoryScene.ts`：Three.js 场景初始化、灯光、后期、工厂布局、Raycaster 交互和渲染循环。
-- `src/three/ModelManager.ts`：GLTF/GLB 模型加载、缓存、实例化、Draco/KTX2 支持和资源释放。
-- `src/managers/AGVController.ts`：AGV 路径巡航、状态机、平滑转向和运行时遥测。
-- `src/managers/DeviceManager.ts`：设备对象创建、状态视觉映射、hover/selected 高亮和动画。
-- `src/websocket/WebSocketService.ts`：实时数据模拟推送，驱动 UI 和 3D 场景联动。
-- `src/views/FactoryDigitalTwin.vue`：页面编排和实时数据订阅入口。
-
-## 本地运行
+## 运行与构建
 
 ```bash
 npm install
-npm run dev
-```
-
-默认开发地址：
-
-```text
-http://localhost:5173
-```
-
-## 构建
-
-```bash
-npm run build
-```
-
-构建产物会输出到 `dist/`。
-
-## 本地预览生产包
-
-```bash
+npm run dev      # http://localhost:5173
+npm run build    # 质量门：vue-tsc --noEmit && vite build，产物 dist/
 npm run preview
 ```
 
-## 部署说明
+## 移动端适配
 
-### 静态服务器部署
+窄屏（≤ 900px，手机 / 竖屏平板）自动切换为「三维场景 + 底部标签抽屉」布局，桌面大屏布局与取景保持不变：
 
-执行构建后，将 `dist/` 目录部署到任意静态服务器即可，例如 Nginx、Apache、OSS、COS、Vercel、Netlify 或 GitHub Pages。
+- **顶栏**：收起英文副标题，运行操作与 KPI 指标合并为一条可横向滑动的操作条，避免挤出屏幕。
+- **底部标签栏**：三维场景 / 参数控制 / 任务调度 / 运行日志；点击展开抽屉，再次点击同一标签或点遮罩收起。
+- **抽屉**：参数、任务、日志三块面板改为浮层（约 64% 屏高、内部独立滚动，日志最多展示 60 条），桌面端仍为大屏三栏。
+- **触控交互**：三维视口 `touch-action: none`，手势全部交给 OrbitControls（单指旋转、双指缩放/平移）；输入框字号 16px 避免 iOS 聚焦自动缩放；按钮与货位格放大到可点按尺寸。
+- **竖屏取景**：按内容包围盒二分求距 + 沿机身纵向俯视，保证整舱（两侧货位、右舷双舱门与装卸平台）完整入画并居中；横竖屏切换、参数重建后自动重新取景。
+- **移动端性能**：渲染倍率上限 1.5、阴影响应图 1024，降低移动 GPU 压力。
+- **安全区**：`viewport-fit=cover` + `env(safe-area-inset-bottom)`，适配 iPhone 刘海屏与圆角屏。
 
-```bash
-npm run build
+验证方式（无头 Chrome + CDP）：390×844 / 360×640 竖屏与 844×390 横屏下抽屉、取景、触控目标均已验证；1440×900 桌面渲染与适配前逐像素一致。
+
+## 目录结构（要点）
+
+```text
+src/
+  config/cargo.ts               布局/尺寸/门位/ULD 参数（唯一默认值）
+  types/cargo.ts                SceneCommand / AlgorithmEvent / ControlCommand 契约
+  utils/{coord,layout}.ts       坐标换算 / 槽位与走廊几何纯函数
+  scene/FactoryScene.ts         货舱 + 门 + 槽位 + 路径/障碍/目标脉冲图层 + 场景探针
+  managers/{AGVTransportManager,CargoManager}.ts
+  store/cargoStore.ts           任务/AGV/货物/门/日志单一状态镜像
+  websocket/TransportMessageBus.ts   下行分发 + 上行控制 + 探针
+  websocket/MockScheduler.ts    演示编排源（非算法）
+  websocket/AlgorithmAdapter.ts 真实算法 WS 接入（预留）
+  views/CargoDigitalTwin.vue    页面编排
+  components/scene/ThreeCargoViewport.vue  场景生命周期 + SceneCommand 路由 + config 重建
+  components/layout/*.vue       顶栏/参数面板/任务与状态面板/日志
+docs/ 方案.md · 算法接入协议.md
 ```
 
-### GitHub Pages 部署
+## 坐标系速查
 
-项目已使用相对资源路径配置，适合部署到 GitHub Pages 的仓库子路径。
-
-推荐流程：
-
-1. 推送代码到 GitHub。
-2. 执行 `npm run build`。
-3. 将 `dist/` 目录作为 Pages 发布目录，或使用 GitHub Actions 自动构建发布。
-
-一个最小 GitHub Actions 示例：
-
-```yaml
-name: Deploy GitHub Pages
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-      - uses: actions/deploy-pages@v4
-```
+| 记号 | 含义 |
+|---|---|
+| O(0,0,0) | 机头原点；地板上表面 Y=0 |
+| +X / 机尾向 | 机头 → 机尾（逆航向） |
+| +Y | 竖直向上 |
+| +Z | 飞行方向左侧（左舷 port） |
+| 舱门 | forward/aft，均位于右舷 -Z |
+| SLOT-L-xx / SLOT-R-xx | 左舷/右舷货位（机头起 00 递增） |
 
 ## 浏览器兼容
 
-建议使用支持 WebGL2 的现代浏览器：
-
-- Chrome
-- Edge
-- Firefox
-- Safari 16+
+建议使用支持 WebGL2 的现代浏览器：Chrome / Edge / Firefox / Safari 16+。
 
 ## 开源协议
 
-本项目基于 MIT License 开源，详见 [LICENSE](./LICENSE)。
-
-<p align="right">
-  <a href="#smart-factory-digital-twin">返回顶部</a> | <a href="#english">English</a>
-</p>
-
----
-
-<a id="english"></a>
-
-## English
-
-<p align="right">
-  <a href="#中文">中文</a> | <a href="#smart-factory-digital-twin">Back to Top</a>
-</p>
-
-Smart Factory Digital Twin is a portfolio-ready frontend project for industrial digital twin visualization. It is built with Vue 3, TypeScript, Vite, Three.js, Element Plus, and ECharts, simulating a factory workshop, AGV patrol routes, IoT device telemetry, real-time alarms, dashboard analytics, and 3D interaction.
-
-![Smart Factory Digital Twin Demo](./docs/images/factory-layout-1920.jpg)
-
-## Contact and Business Cooperation
-
-If you have any questions, suggestions, or business cooperation needs related to digital twins, Three.js 3D visualization, industrial dashboards, or frontend engineering, feel free to contact me via WeChat.
-
-![WeChat Contact](./docs/images/wechat-contact.jpg)
-
-## Features
-
-- Factory workshop digital twin scene with AGV transport area, industrial equipment area, warehouse area, robotic arm area, camera monitoring area, and dashboard area.
-- Industrial Three.js scene using `WebGLRenderer`, `PerspectiveCamera`, `OrbitControls`, `EffectComposer`, `UnrealBloomPass`, and FXAA post-processing.
-- AGV patrol system based on `CatmullRomCurve3`, with smooth `Quaternion` rotation, multiple AGVs, configurable speed, and state machine support.
-- IoT device system with `running`, `warning`, `error`, and `offline` states, including state-based color, glow, and alarm pulse effects.
-- Real-time data simulation through `WebSocketService`, covering device temperature, power, battery, alarms, AGV status, and live logs.
-- Mouse interaction powered by `Raycaster`, supporting device hover, click highlight, and real-time information popovers.
-- Data dashboard powered by ECharts, showing device online rate, AGV count, daily tasks, alarm statistics, power consumption, and temperature trend.
-- Performance-oriented implementation with `requestAnimationFrame`, `InstancedMesh`, Frustum Culling, DracoLoader, KTX2Loader, resource disposal, and responsive resizing.
-
-## Tech Stack
-
-- Vue 3
-- TypeScript
-- Vite
-- Three.js
-- Element Plus
-- ECharts
-- Pinia
-
-## Project Structure
-
-```text
-src/
-  assets/        Global styles and static assets
-  components/    Dashboard layout, charts, and Three.js viewport components
-  managers/      Business object managers for AGVs and devices
-  scene/         Three.js scene orchestration
-  store/         Pinia real-time state management
-  three/         Model loading, caching, and disposal utilities
-  types/         Factory domain type definitions
-  utils/         Time and resource disposal helpers
-  views/         Page-level views
-  websocket/     Mock WebSocket real-time data service
-public/
-  basis/         KTX2 / Basis texture decoders
-  draco/         Draco model decoders
-docs/
-  images/        README demo screenshots
-```
-
-## Core Modules
-
-- `src/scene/FactoryScene.ts`: Three.js initialization, lighting, post-processing, factory layout, Raycaster interaction, and render loop.
-- `src/three/ModelManager.ts`: GLTF/GLB model loading, caching, instancing, Draco/KTX2 support, and resource disposal.
-- `src/managers/AGVController.ts`: AGV patrol path, state machine, smooth rotation, and runtime telemetry.
-- `src/managers/DeviceManager.ts`: Device creation, state-based visual mapping, hover/selected highlight, and animation.
-- `src/websocket/WebSocketService.ts`: Mock real-time data push service that drives both UI and 3D scene updates.
-- `src/views/FactoryDigitalTwin.vue`: Page orchestration and real-time data subscription entry.
-
-## Local Development
-
-```bash
-npm install
-npm run dev
-```
-
-Default development URL:
-
-```text
-http://localhost:5173
-```
-
-## Build
-
-```bash
-npm run build
-```
-
-The production assets will be generated in `dist/`.
-
-## Preview Production Build
-
-```bash
-npm run preview
-```
-
-## Deployment
-
-### Static Server
-
-After building the project, deploy the `dist/` directory to any static server, such as Nginx, Apache, OSS, COS, Vercel, Netlify, or GitHub Pages.
-
-```bash
-npm run build
-```
-
-### GitHub Pages
-
-The project uses relative asset paths, so it is suitable for GitHub Pages repository subpath deployment.
-
-Recommended workflow:
-
-1. Push the code to GitHub.
-2. Run `npm run build`.
-3. Publish the `dist/` directory as the Pages output, or use GitHub Actions for automatic deployment.
-
-Minimal GitHub Actions example:
-
-```yaml
-name: Deploy GitHub Pages
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-      - uses: actions/deploy-pages@v4
-```
-
-## Browser Compatibility
-
-Use a modern browser with WebGL2 support:
-
-- Chrome
-- Edge
-- Firefox
-- Safari 16+
-
-## License
-
-This project is open-sourced under the MIT License. See [LICENSE](./LICENSE) for details.
-
-<p align="right">
-  <a href="#smart-factory-digital-twin">Back to Top</a> | <a href="#中文">中文</a>
-</p>
+MIT License（见 [LICENSE](./LICENSE)）。

@@ -1,7 +1,7 @@
 <template>
-  <FactoryDigitalTwin />
+  <CargoDigitalTwin />
 </template>
 
 <script setup lang="ts">
-import FactoryDigitalTwin from '@/views/FactoryDigitalTwin.vue';
+import CargoDigitalTwin from '@/views/CargoDigitalTwin.vue';
 </script>

@@ -1,3 +1,28 @@
+/* ============================================================
+   白色系亮色大屏主题（全球样式与通用控件）
+   主色白/浅灰蓝；状态色：蓝 #1677ff、绿 #0fae6f、琥珀 #f5a524、红 #e5484d
+   ============================================================ */
+:root {
+  --bg: #eef3f9;
+  --panel-1: #ffffff;
+  --panel-2: #f3f8fe;
+  --line: #d3e0f0;
+  --line-soft: #e6edf6;
+  --text-1: #16345c;
+  --text-2: #3f648c;
+  --text-3: #7d97b5;
+  --muted: #a9bcd1;
+  --accent: #1677ff;
+  --accent-deep: #0f5fd0;
+  --ok: #0fae6f;
+  --ok-deep: #0a8a56;
+  --warn: #f5a524;
+  --warn-deep: #c37f06;
+  --danger: #e5484d;
+  --danger-deep: #c33238;
+  --shadow: 0 6px 22px rgba(38, 92, 153, 0.14);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -9,9 +34,29 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #07111f;
-  color: #dcecff;
+  background: var(--bg);
+  color: var(--text-1);
   font-family: Inter, "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* 移动端浏览器地址栏收放时用动态视口高度，避免底部内容被裁切。 */
+@supports (height: 100dvh) {
+  #app {
+    height: 100dvh;
+  }
+}
+
+/* 触屏点击不出现高亮方块。 */
+button,
+.c-btn,
+.seg,
+.slot-cell,
+.clear-link,
+.c-switch {
+  -webkit-tap-highlight-color: transparent;
 }
 
 button,
@@ -20,10 +65,9 @@ input {
 }
 
 .panel {
-  border: 1px solid rgba(65, 183, 255, 0.22);
-  background: linear-gradient(180deg, rgba(9, 26, 45, 0.92), rgba(7, 17, 31, 0.82));
-  box-shadow: 0 0 30px rgba(0, 183, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel-1), var(--panel-2));
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .panel-title {
@@ -31,9 +75,9 @@ input {
   align-items: center;
   justify-content: space-between;
   height: 34px;
-  color: #a9d7ff;
+  color: var(--accent-deep);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0;
 }
 
@@ -42,39 +86,223 @@ input {
   height: 16px;
   margin-right: 8px;
   border-radius: 2px;
-  background: #1d8fff;
-  box-shadow: 0 0 12px rgba(29, 143, 255, 0.86);
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(22, 119, 255, 0.55);
   content: "";
 }
 
+/* 状态点（亮色下使用深一档的彩色文字） */
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  box-shadow: 0 0 12px currentColor;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .status-running {
-  color: #39f5b6;
+  color: var(--ok);
 }
 
 .status-warning {
-  color: #ffc857;
+  color: var(--warn-deep);
 }
 
 .status-error,
 .status-critical {
-  color: #ff4d6d;
+  color: var(--danger-deep);
 }
 
 .status-offline {
-  color: #7f8fa3;
+  color: #93a7bd;
 }
 
-.el-progress-bar__outer {
-  background-color: rgba(255, 255, 255, 0.1) !important;
+/* ============================================================
+   通用控件（白色亮色主题）
+   ============================================================ */
+.c-input,
+.c-select {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid #c3d5ec;
+  border-radius: 5px;
+  background: #ffffff;
+  color: var(--text-1);
+  font-size: 12px;
+  outline: none;
+  box-shadow: inset 0 1px 2px rgba(30, 70, 120, 0.05);
 }
 
-.el-tag {
+.c-input:focus,
+.c-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.18);
+}
+
+.c-select option {
+  background: #ffffff;
+}
+
+.c-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border: 1px solid rgba(22, 119, 255, 0.4);
+  border-radius: 5px;
+  background: rgba(22, 119, 255, 0.09);
+  color: var(--accent-deep);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.18s ease;
+}
+
+.c-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(22, 119, 255, 0.18);
+}
+
+.c-btn.primary {
+  border-color: rgba(15, 174, 111, 0.6);
+  background: linear-gradient(135deg, rgba(15, 174, 111, 0.22), rgba(22, 119, 255, 0.2));
+  color: #0b7a4f;
+}
+
+.c-btn.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(15, 174, 111, 0.34), rgba(22, 119, 255, 0.3));
+}
+
+.c-btn.danger {
+  border-color: rgba(229, 72, 77, 0.5);
+  background: rgba(229, 72, 77, 0.1);
+  color: var(--danger-deep);
+}
+
+.c-btn.danger:hover:not(:disabled) {
+  background: rgba(229, 72, 77, 0.18);
+}
+
+.c-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.c-btn.sm {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.c-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.c-switch input {
+  accent-color: var(--accent);
+}
+
+.c-chip {
+  display: inline-block;
+  padding: 1px 7px;
   border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  font-weight: 600;
+}
+
+.c-chip.green {
+  background: rgba(15, 174, 111, 0.14);
+  color: var(--ok-deep);
+}
+
+.c-chip.blue {
+  background: rgba(22, 119, 255, 0.13);
+  color: var(--accent-deep);
+}
+
+.c-chip.amber {
+  background: rgba(245, 165, 36, 0.16);
+  color: var(--warn-deep);
+}
+
+.c-chip.red {
+  background: rgba(229, 72, 77, 0.14);
+  color: var(--danger-deep);
+}
+
+.c-chip.gray {
+  background: rgba(110, 132, 158, 0.13);
+  color: #5d7691;
+}
+
+.c-field {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.c-field > label {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.c-field .unit {
+  color: #9ab0c8;
+  font-size: 10px;
+  margin-left: 3px;
+}
+
+/* ============================================================
+   移动端（手机 / 窄屏）适配
+   ============================================================ */
+:root {
+  --tab-h: 54px;                              /* 移动端底部标签栏高度 */
+  --safe-b: env(safe-area-inset-bottom, 0px); /* iOS 底部安全区 */
+}
+
+@media (max-width: 900px) {
+  /* 触屏控件放大到可点按尺寸 */
+  .c-btn {
+    min-height: 34px;
+    padding: 6px 12px;
+    font-size: 13px;
+    touch-action: manipulation;
+  }
+
+  .c-btn.sm {
+    min-height: 30px;
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+
+  /* 输入框 16px：避免 iOS Safari 聚焦输入时自动放大整页 */
+  .c-input,
+  .c-select {
+    min-height: 34px;
+    font-size: 16px;
+  }
+
+  .c-switch {
+    min-height: 34px;
+    font-size: 13px;
+  }
+
+  .c-switch input {
+    width: 18px;
+    height: 18px;
+  }
+
+  .c-field {
+    grid-template-columns: 68px 1fr;
+  }
 }
