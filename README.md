@@ -26,6 +26,9 @@ npm run build    # 质量门：vue-tsc --noEmit && vite build，产物 dist/
 npm run preview
 ```
 
+在线演示（GitHub Pages，push 到 work / main 自动重新部署）：
+<https://gaoyangyang-1.github.io/threejs-factory-demo/>
+
 ## 移动端适配
 
 窄屏（≤ 900px，手机 / 竖屏平板）自动切换为「三维场景 + 底部标签抽屉」布局，桌面大屏布局与取景保持不变：
