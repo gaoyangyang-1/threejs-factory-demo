@@ -1,0 +1,60 @@
+# 将 dist/ 构建产物发布到 GitHub Pages（公开仓库免费、永久在线，
+# 不依赖本机开机，也不需要内网穿透）。
+#
+# 首次运行由 configure-pages 的 enablement 自动开启 Pages；
+# 之后每次推送到 work / main 都会重新构建并发布。
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [work, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (vue-tsc --noEmit && vite build)
+        run: npm run build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
