@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import type { CargoConfig } from '@/config/cargo';
 import { slotIdOf, slotHalfSpan } from '@/config/cargo';
 import type { CargoItem, CargoType, Pose3 } from '@/types/cargo';
+import { slotCells } from '@/utils/layout';
 
 const ULD_COLOR: Record<CargoType, number> = {
   AKE: 0x3b82f6,
@@ -25,7 +26,7 @@ export interface CargoMeshGroup extends THREE.Group {
 }
 
 interface SlotPose {
-  side: 'L' | 'R';
+  side: 'L' | 'R' | 'C';
   column: number;
   x: number;
   z: number;
@@ -41,10 +42,8 @@ export class CargoManager {
 
   constructor(private readonly config: CargoConfig) {
     this.group.name = 'CargoManager';
-    for (let column = 0; column < config.slotCount; column++) {
-      const x = config.slotStartX + column * config.slotPitch;
-      this.slotPoses.push({ side: 'L', column, x, z: config.slotZ });
-      this.slotPoses.push({ side: 'R', column, x, z: -config.slotZ });
+    for (const cell of slotCells(config)) {
+      this.slotPoses.push({ side: cell.side, column: cell.column, x: cell.x, z: cell.z });
     }
   }
 
@@ -55,14 +54,14 @@ export class CargoManager {
   getSlotPose(slotId: string): { x: number; z: number; yaw: number } | null {
     const parsed = this.parseSlotId(slotId);
     if (!parsed) return null;
-    return { x: parsed.x, z: parsed.z, yaw: parsed.side === 'L' ? 0 : 0 };
+    return { x: parsed.x, z: parsed.z, yaw: 0 };
   }
 
   isSlotFree(slotId: string): boolean {
     return !this.occupancy.has(slotId);
   }
 
-  findFreeSlot(side?: 'L' | 'R'): string | null {
+  findFreeSlot(side?: 'L' | 'R' | 'C'): string | null {
     const filtered = side ? this.slotPoses.filter((slot) => slot.side === side) : this.slotPoses;
     const free = filtered.find((slot) => !this.occupancy.has(slotIdOf(slot.side, slot.column)));
     return free ? slotIdOf(free.side, free.column) : null;
@@ -199,9 +198,9 @@ export class CargoManager {
   }
 
   private parseSlotId(slotId: string): SlotPose | null {
-    const matched = /^SLOT-([LR])-(\d+)$/.exec(slotId);
+    const matched = /^SLOT-([LRC])-(\d+)$/.exec(slotId);
     if (!matched) return null;
-    const side = matched[1] as 'L' | 'R';
+    const side = matched[1] as 'L' | 'R' | 'C';
     const column = Number(matched[2]);
     const slot = this.slotPoses.find((item) => item.side === side && item.column === column);
     return slot ?? null;

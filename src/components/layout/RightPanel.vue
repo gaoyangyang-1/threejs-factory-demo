@@ -118,23 +118,10 @@
           <span><i class="dot selected"></i>目标</span>
         </div>
         <div class="slot-rows">
-          <div class="slot-row">
-            <span class="row-side">左 L(+Z)</span>
+          <div v-for="row in slotRows" :key="row.side" class="slot-row">
+            <span class="row-side">{{ row.label }}</span>
             <button
-              v-for="tile in tiles('L')"
-              :key="tile.slotId"
-              class="slot-cell"
-              :class="tile.state"
-              :title="tile.slotId"
-              @click="pickTile(tile)"
-            >
-              {{ tile.column + 1 }}
-            </button>
-          </div>
-          <div class="slot-row">
-            <span class="row-side">右 R(-Z)</span>
-            <button
-              v-for="tile in tiles('R')"
+              v-for="tile in tiles(row.side)"
               :key="tile.slotId"
               class="slot-cell"
               :class="tile.state"
@@ -183,9 +170,16 @@ function pickTile(tile: { slotId: string; state: string }) {
   slotChoice.value = next ?? '';
 }
 
-function tiles(side: 'L' | 'R') {
+function tiles(side: 'L' | 'R' | 'C') {
   return store.slotTiles.filter((t) => t.side === side).sort((a, b) => a.column - b.column);
 }
+
+/** 三排货位：左舷 / 右舷 / 中央（全舱宽度可放货，无专用通道）。 */
+const slotRows = [
+  { side: 'L' as const, label: '左 L(+Z)' },
+  { side: 'R' as const, label: '右 R(-Z)' },
+  { side: 'C' as const, label: '中 C(0)' }
+];
 
 const statusText = (s: string) =>
   s === 'queued' ? '排队' : s === 'running' ? '执行中' : s === 'done' ? '完成' : s === 'failed' ? '异常' : '已取消';

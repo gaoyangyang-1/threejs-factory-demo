@@ -62,8 +62,8 @@ interface SlotPulse {
 }
 
 // 场景色板（白色亮色主题；与全局 UI 状态色一致）。
-const C_WALL = 0xd6e2f1; // 舱壁 浅灰蓝
-const C_DECK = 0xf3f8fd; // 地板 近白
+const C_WALL = 0xc9d9ec; // 舱壁 浅灰蓝
+const C_DECK = 0xd7e3f1; // 地板 冷淡蓝（压低亮度，避免货位格线被高光冲淡）
 const C_STRUCT = 0x93aecd; // 骨架 中性钢蓝
 const C_BLUE = 0x1677ff;
 const C_GREEN = 0x0fae6f;
@@ -124,7 +124,7 @@ export class FactoryScene {
     this.controls.maxDistance = 46;
 
     const renderPass = new RenderPass(this.scene, this.camera);
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.4, 0.7, 0.82);
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.28, 0.7, 0.92);
     this.fxaaPass = new ShaderPass(FXAAShader);
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(renderPass);
@@ -138,6 +138,11 @@ export class FactoryScene {
 
     this.resize();
     window.addEventListener('resize', this.handleResize);
+
+    // 仅开发环境：暴露场景实例便于无头浏览器验证取景/几何（生产构建会被摇掉）。
+    if (import.meta.env.DEV) {
+      (window as unknown as Record<string, unknown>).__dtScene = this;
+    }
   }
 
   start(): void {
@@ -175,54 +180,53 @@ export class FactoryScene {
    *    保证整舱（两侧货位、右舷舱门与装卸平台）完整落入画面——同样适用于横竖屏切换与参数重建。
    */
   private frameCamera(): void {
-    const cfg = this.config;
     const aspect = this.camera.aspect > 0 ? this.camera.aspect : 1;
+    const box = this.contentBounds();
+    const center = new THREE.Vector3((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, (box.z0 + box.z1) / 2);
 
+    // 观察方向：横屏自右舷后上方俯视整机（仰角要够高，否则右舷墙会挡住舱内）；
+    // 竖屏沿机身纵轴略偏右舷（能看到舱门与舱外待命区）。
+    let dir: THREE.Vector3;
     if (aspect >= 1) {
-      const camDist = 11 + cfg.hold.length * 0.55;
-      this.camera.position.set(camDist * 0.4, camDist * 0.42, -camDist * 0.42);
-      this.controls.target.set(cfg.hold.length / 2, 0.3, 0);
-      this.controls.maxDistance = 46;
-      this.controls.update();
-      return;
+      dir = new THREE.Vector3(0.42, 0.92, -0.62).normalize();
+    } else {
+      const azimuth = (14 * Math.PI) / 180;
+      const elevation = (38 * Math.PI) / 180;
+      dir = new THREE.Vector3(
+        Math.cos(azimuth) * Math.cos(elevation),
+        Math.sin(elevation),
+        -Math.sin(azimuth) * Math.cos(elevation)
+      ).normalize();
     }
 
-    // 竖屏：目标点取货舱高度中部，沿机身轴线略偏右舷（可看到双舱门），仰角 38°。
-    const target = new THREE.Vector3(cfg.hold.length / 2, Math.max(0.9, cfg.hold.wallHeight * 0.45), 0);
-    const azimuth = (14 * Math.PI) / 180;
-    const elevation = (38 * Math.PI) / 180;
-    const dir = new THREE.Vector3(
-      Math.cos(azimuth) * Math.cos(elevation),
-      Math.sin(elevation),
-      -Math.sin(azimuth) * Math.cos(elevation)
-    ).normalize();
-
-    let dist = this.fitCameraDistance(target, dir);
-    // 竖屏窄长，投影后有偏移：按内容包围盒中心平移目标点并重新求距，让整舱居中且尽量填满屏幕。
+    // 按内容包围盒二分求距，保证机头/机尾/舱门/待命区完整入画并居中。
+    let dist = this.fitCameraDistance(center, dir);
     for (let i = 0; i < 2; i += 1) {
-      const shift = this.frameShift(target, dir, dist);
+      const shift = this.frameShift(center, dir, dist);
       if (!shift) break;
-      target.add(shift);
-      dist = this.fitCameraDistance(target, dir);
+      center.add(shift);
+      dist = this.fitCameraDistance(center, dir);
     }
+    // 目标点不要沉到地板以下（否则相机会压得很低，侧墙挡住舱内），并按修正后的目标重新求距。
+    center.y = Math.max(0.8, Math.min(center.y, 2.2));
+    dist = this.fitCameraDistance(center, dir);
 
-    this.placeCamera(target, dir, dist);
-    this.controls.target.copy(target);
-    // 竖屏取景距离远大于桌面默认上限，放宽缩放上限避免 OrbitControls 把相机拉回。
-    this.controls.maxDistance = Math.max(46, dist * 1.35);
+    this.placeCamera(center, dir, dist);
+    this.controls.target.copy(center);
+    this.controls.maxDistance = Math.max(60, dist * 1.4);
     this.controls.update();
   }
 
-  /** 内容包围盒：整舱 + 舱壁厚度 + 右舷装卸平台 + 舱门标牌高度。 */
+  /** 内容包围盒：机头锥段 + 整舱 + 尾部 + 舱壁厚度 + 右舷装卸平台 + 标牌高度。 */
   private contentBounds() {
     const cfg = this.config;
     const halfW = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness;
     return {
-      x0: -0.6,
-      x1: cfg.hold.length + 0.6,
+      x0: -(cfg.nose.length + 0.8),
+      x1: cfg.hold.length + cfg.tail.length + 0.8,
       y0: 0,
-      y1: Math.max(3.1, cfg.hold.wallHeight + 0.6),
-      z0: -halfW - 2.1,
+      y1: Math.max(cfg.hold.wallHeight + 1.5, 4.0),
+      z0: -halfW - 2.6,
       z1: halfW
     };
   }
@@ -416,9 +420,9 @@ export class FactoryScene {
 
   private configureScene(): void {
     this.scene.fog = new THREE.Fog(0xe9f0f8, 45, 120);
-    const hemi = new THREE.HemisphereLight(0xffffff, 0xbdd2ea, 1.1);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xbdd2ea, 0.9);
     this.scene.add(hemi);
-    const key = new THREE.DirectionalLight(0xffffff, 2.4);
+    const key = new THREE.DirectionalLight(0xffffff, 1.7);
     key.position.set(8, 16, 8);
     key.castShadow = true;
     key.shadow.mapSize.set(this.compactView ? 1024 : 2048, this.compactView ? 1024 : 2048);
@@ -461,7 +465,8 @@ export class FactoryScene {
     this.slotPulses.clear();
 
     const cfg = this.config;
-    const centerX = cfg.hold.length / 2;
+    // 整机（机头锥段 + 货舱 + 机尾锥段）中心，用作地面与取景基准。
+    const centerX = (cfg.hold.length - cfg.nose.length + cfg.tail.length) / 2;
 
     // 相机与轨道目标随货舱长度、视口宽高比自适应（见 frameCamera）。
     this.frameCamera();
@@ -470,12 +475,12 @@ export class FactoryScene {
     this.cargoManager = new CargoManager(cfg);
     this.scene.add(this.cargoManager.group);
 
-    // AGV 角色与驻泊位（机头/机尾空场，见 utils/layout agvRoles）。
+    // AGV 角色与待命位（全部在前舱门外平台待命，见 utils/layout agvRoles）。
     this.agvManager = new AGVTransportManager(
-      agvRoles(cfg).map((role) => ({
+      agvRoles(cfg).map((role, index) => ({
         id: role.id,
         name: role.id,
-        color: role.fromColumn === 0 ? C_GREEN : C_AMBER,
+        color: index === 0 ? C_GREEN : C_AMBER,
         length: cfg.agv.length,
         width: cfg.agv.width,
         height: cfg.agv.height,
@@ -487,11 +492,170 @@ export class FactoryScene {
     );
     this.scene.add(this.agvManager.group);
 
+    this.buildNose();
+    this.buildTail();
     this.buildHull();
     this.buildDoors();
     this.buildFloorLayout();
     this.buildSlotPulses();
     this.buildSeededCargo();
+  }
+
+  /**
+   * 机头锥段（沿 -X 自货舱前隔板向前延伸）：椭圆截面收束的机身壳 + 驾驶舱舷窗，
+   * 用于在三维上直观区分机头/机尾——机身坐标 +X 指向机尾，故机头位于 X<0。
+   */
+  private buildNose(): void {
+    const cfg = this.config;
+    const noseLen = cfg.nose.length;
+    if (noseLen <= 0.2) return;
+    const aZ = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness - 0.02;
+    const aY = cfg.hold.wallHeight + 0.14;
+    const centerY = cfg.hold.wallHeight * 0.5;
+
+    const rings = 18;
+    const segs = 32;
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const profileScale = (t: number): number => Math.max(0.05, Math.sqrt(Math.max(0, 1 - Math.pow(t, 2.3))));
+    for (let i = 0; i <= rings; i += 1) {
+      const t = i / rings;
+      const x = -t * noseLen;
+      const s = profileScale(t);
+      for (let j = 0; j <= segs; j += 1) {
+        const ang = (j / segs) * Math.PI * 2;
+        positions.push(x, centerY + Math.sin(ang) * aY * s, Math.cos(ang) * aZ * s);
+      }
+    }
+    const rowLen = segs + 1;
+    for (let i = 0; i < rings; i += 1) {
+      for (let j = 0; j < segs; j += 1) {
+        const a = i * rowLen + j;
+        const b = a + 1;
+        const c = a + rowLen;
+        const d = c + 1;
+        indices.push(a, c, b, b, c, d);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    const shell = new THREE.Mesh(
+      geometry,
+      new THREE.MeshStandardMaterial({
+        color: 0xe7eef8,
+        roughness: 0.55,
+        metalness: 0.3,
+        side: THREE.DoubleSide
+      })
+    );
+    shell.castShadow = true;
+    shell.receiveShadow = true;
+    this.world.add(shell);
+
+    // 驾驶舱舷窗：贴在机头上部两侧（沿曲面外法线朝外）。
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0x16324f,
+      roughness: 0.12,
+      metalness: 0.92,
+      emissive: 0x0d2038,
+      emissiveIntensity: 0.5
+    });
+    const windowAt = (t: number, angOffset: number, w: number, h: number): void => {
+      const s = profileScale(t);
+      const x = -t * noseLen;
+      const ang = Math.PI / 2 + angOffset;
+      const p = new THREE.Vector3(x, centerY + Math.sin(ang) * aY * s, Math.cos(ang) * aZ * s);
+      const radial = new THREE.Vector3(0, p.y - centerY, p.z).normalize();
+      const win = new THREE.Mesh(new THREE.PlaneGeometry(w, h), glassMat);
+      win.position.copy(p).addScaledVector(radial, 0.02);
+      win.lookAt(p.clone().add(radial));
+      this.world.add(win);
+    };
+    for (const sign of [1, -1]) {
+      // 前风挡（靠近机头中线）与侧窗（靠外侧）。
+      windowAt(0.46, sign * 0.2, 0.92, 0.4);
+      windowAt(0.6, sign * 0.44, 0.7, 0.34);
+      windowAt(0.72, sign * 0.58, 0.5, 0.3);
+    }
+
+    // 机头雷达罩分色线（示意）。
+    const radome = new THREE.Mesh(
+      new THREE.TorusGeometry(1, 0.03, 6, 36),
+      new THREE.MeshStandardMaterial({ color: 0x9fb4cf, roughness: 0.7, metalness: 0.3 })
+    );
+    const radomeT = 0.86;
+    const rs = profileScale(radomeT);
+    radome.scale.set(aZ * rs, aY * rs, 1);
+    radome.rotation.y = Math.PI / 2;
+    radome.position.set(-noseLen * radomeT, centerY, 0);
+    this.world.add(radome);
+
+    this.world.add(this.createTextSprite('机头 · NOSE', { x: -noseLen * 0.45, y: aY + 0.95, z: 0 }, 0.55, 0x1257c4));
+  }
+
+  /** 机尾锥段（沿 +X 延伸）+ 垂尾，与机头形成明确的前后区分。 */
+  private buildTail(): void {
+    const cfg = this.config;
+    const tailLen = cfg.tail.length;
+    if (tailLen <= 0.2) return;
+    const len = cfg.hold.length;
+    const aZ = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness - 0.02;
+    const aY = cfg.hold.wallHeight + 0.14;
+    const centerY = cfg.hold.wallHeight * 0.5;
+
+    const rings = 10;
+    const segs = 28;
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const profileScale = (t: number): number => 1 - 0.55 * t * t;
+    for (let i = 0; i <= rings; i += 1) {
+      const t = i / rings;
+      const x = len + t * tailLen;
+      const s = profileScale(t);
+      for (let j = 0; j <= segs; j += 1) {
+        const ang = (j / segs) * Math.PI * 2;
+        positions.push(x, centerY + Math.sin(ang) * aY * s, Math.cos(ang) * aZ * s);
+      }
+    }
+    const rowLen = segs + 1;
+    for (let i = 0; i < rings; i += 1) {
+      for (let j = 0; j < segs; j += 1) {
+        const a = i * rowLen + j;
+        const b = a + 1;
+        const c = a + rowLen;
+        const d = c + 1;
+        indices.push(a, b, c, b, d, c);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    const shell = new THREE.Mesh(
+      geometry,
+      new THREE.MeshStandardMaterial({ color: 0xe7eef8, roughness: 0.55, metalness: 0.3, side: THREE.DoubleSide })
+    );
+    shell.castShadow = true;
+    this.world.add(shell);
+
+    // 垂尾（示意）：机尾上方的后掠鳍面，从尾锥顶部立起。
+    const finShape = new THREE.Shape();
+    finShape.moveTo(0, 0);
+    finShape.lineTo(tailLen * 0.82, 0);
+    finShape.lineTo(tailLen * 0.5, 1.15);
+    finShape.lineTo(tailLen * 0.18, 1.15);
+    finShape.closePath();
+    const fin = new THREE.Mesh(
+      new THREE.ExtrudeGeometry(finShape, { depth: 0.16, bevelEnabled: false }),
+      new THREE.MeshStandardMaterial({ color: 0xdbe6f4, roughness: 0.5, metalness: 0.35 })
+    );
+    fin.position.set(len + 0.1, cfg.hold.wallHeight + 0.02, -0.08);
+    fin.castShadow = true;
+    this.world.add(fin);
+
+    this.world.add(this.createTextSprite('机尾 · TAIL', { x: len + tailLen * 0.5, y: aY + 0.95, z: 0 }, 0.55, 0xe07a1f));
   }
 
   private buildHull(): void {
@@ -522,25 +686,21 @@ export class FactoryScene {
     // 左舷(+Z)整墙。
     this.world.add(this.wallSegment(wallMat, len, wallH, wallT, 0, len, cx, wallCenterZ));
 
-    // 右舷(-Z)墙：按前后舱门洞开窗分段（洞宽 door.width、洞高 door.height）。
-    const bands = [
-      { minX: cfg.doors.forward.x - cfg.doors.forward.width / 2, maxX: cfg.doors.forward.x + cfg.doors.forward.width / 2 },
-      { minX: cfg.doors.aft.x - cfg.doors.aft.width / 2, maxX: cfg.doors.aft.x + cfg.doors.aft.width / 2 }
-    ].sort((a, b) => a.minX - b.minX);
-    let cursor = 0;
-    for (const band of bands) {
-      if (band.minX > cursor + 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, cursor, band.minX, cx, -wallCenterZ));
-      cursor = band.maxX;
-    }
-    if (cursor < len - 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, cursor, len, cx, -wallCenterZ));
-    // 门洞上方墙体段（Y: doorHeight..wallHeight）。
-    for (const spec of [cfg.doors.forward, cfg.doors.aft]) {
-      const header = new THREE.Mesh(new THREE.BoxGeometry(spec.width + wallT, wallH - spec.height, wallT), wallMat);
-      header.position.set(spec.x, spec.height + (wallH - spec.height) / 2, -wallCenterZ);
+    // 右舷(-Z)墙：仅保留一个前舱门开口，其余整段封闭。
+    const door = cfg.doors.forward;
+    const holeMin = door.x - door.width / 2;
+    const holeMax = door.x + door.width / 2;
+    if (holeMin > 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, 0, holeMin, cx, -wallCenterZ));
+    if (holeMax < len - 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, holeMax, len, cx, -wallCenterZ));
+    // 门洞上方墙体（门洞净高达舱壁高度时不再需要）。
+    const headerH = wallH - door.height;
+    if (headerH > 0.02) {
+      const header = new THREE.Mesh(new THREE.BoxGeometry(door.width + wallT, headerH, wallT), wallMat);
+      header.position.set(door.x, door.height + headerH / 2, -wallCenterZ);
       this.world.add(header);
     }
 
-    // 机头/机尾隔板。
+    // 机头（前）/机尾（后）隔框。
     const endWallMat = new THREE.MeshStandardMaterial({ color: C_WALL, roughness: 0.85, metalness: 0.35, side: THREE.DoubleSide });
     const endWall = (x: number) => {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(wallT, wallH, deckHalf * 2), endWallMat);
@@ -601,78 +761,89 @@ export class FactoryScene {
     });
     const t = cfg.hold.wallThickness + 0.22;
 
-    for (const entry of [
-      { doorId: 'forward' as DoorId, spec: cfg.doors.forward, slideDir: 1 },
-      { doorId: 'aft' as DoorId, spec: cfg.doors.aft, slideDir: -1 }
-    ]) {
-      const { doorId, spec, slideDir } = entry;
-      const x = spec.x;
-      const w = spec.width;
-      const h = spec.height;
-      // 门框（围绕洞口的四根边框）。
-      const bar = (bw: number, bh: number, bx: number, by: number) => {
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, t), frameMat);
-        mesh.position.set(bx, by, outerZ - cfg.hold.wallThickness / 2);
-        this.world.add(mesh);
-      };
-      bar(w + 0.3, 0.12, x, h + 0.06); // 上
-      bar(w + 0.3, 0.12, x, -0.06); // 下
-      bar(0.14, h + 0.3, x - w / 2 - 0.07, h / 2);
-      bar(0.14, h + 0.3, x + w / 2 + 0.07, h / 2);
+    const spec = cfg.doors.forward;
+    const x = spec.x;
+    const w = spec.width;
+    const h = spec.height;
+    // 门框（围绕洞口的四根边框）。
+    const bar = (bw: number, bh: number, bx: number, by: number) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, t), frameMat);
+      mesh.position.set(bx, by, outerZ - cfg.hold.wallThickness / 2);
+      this.world.add(mesh);
+    };
+    bar(w + 0.3, 0.12, x, h + 0.06); // 上
+    bar(w + 0.3, 0.12, x, -0.06); // 下
+    bar(0.14, h + 0.3, x - w / 2 - 0.07, h / 2);
+    bar(0.14, h + 0.3, x + w / 2 + 0.07, h / 2);
 
-      // 门扇：位于墙外，开门沿机身轴向滑移避开门洞（前门向后、后门向前）。
-      const leaf = new THREE.Mesh(new THREE.BoxGeometry(w - 0.1, h - 0.1, 0.1), panelMat);
-      leaf.position.set(x, h / 2, leafZ);
-      this.world.add(leaf);
-      this.doorVisuals.push({ doorId, leaf, baseX: x, slideDir, open: 0, target: 0 });
+    // 门扇：位于墙外，开门沿机身轴向（向机尾方向）滑移避开门洞。
+    const leaf = new THREE.Mesh(new THREE.BoxGeometry(w - 0.1, h - 0.1, 0.1), panelMat);
+    leaf.position.set(x, h / 2, leafZ);
+    this.world.add(leaf);
+    this.doorVisuals.push({ doorId: 'forward', leaf, baseX: x, slideDir: 1, open: 0, target: 0 });
 
-      // 门外装卸平台（顶面与地板同高）。
-      const dock = new THREE.Mesh(
-        new THREE.BoxGeometry(w + 0.7, 0.08, 2.1),
-        new THREE.MeshStandardMaterial({ color: 0xcfdcea, roughness: 0.75, metalness: 0.12 })
-      );
-      dock.position.set(x, -0.04, outerZ - 1.05);
-      dock.receiveShadow = true;
-      this.world.add(dock);
-      const dockMark = new THREE.MeshBasicMaterial({ color: C_AMBER, transparent: true, opacity: 0.3 });
-      const line = new THREE.Mesh(new THREE.PlaneGeometry(w + 0.2, 0.03), dockMark);
-      line.rotation.x = -Math.PI / 2;
-      line.position.set(x, 0.012, outerZ - 0.6);
-      this.world.add(line);
-    }
+    // 舱外装卸平台（AGV 待命区；顶面与地板同高）。
+    const dockWidth = Math.max(w + 2.4, 4.6);
+    const dock = new THREE.Mesh(
+      new THREE.BoxGeometry(dockWidth, 0.08, 2.6),
+      new THREE.MeshStandardMaterial({ color: 0xcfdcea, roughness: 0.75, metalness: 0.12 })
+    );
+    dock.position.set(x, -0.04, outerZ - 1.3);
+    dock.receiveShadow = true;
+    this.world.add(dock);
+    const dockMark = new THREE.MeshBasicMaterial({ color: C_AMBER, transparent: true, opacity: 0.3 });
+    const line = new THREE.Mesh(new THREE.PlaneGeometry(dockWidth - 0.4, 0.05), dockMark);
+    line.rotation.x = -Math.PI / 2;
+    line.position.set(x, 0.012, outerZ - 0.55);
+    this.world.add(line);
+    // 待命区地面标线（AGV 停在此处等待任务）。
+    const standLine = new THREE.Mesh(new THREE.PlaneGeometry(dockWidth - 1.0, 0.04), dockMark);
+    standLine.rotation.x = -Math.PI / 2;
+    standLine.position.set(x, 0.012, outerZ - 2.35);
+    this.world.add(standLine);
 
-    // 门位标牌（亮色背景下使用深蓝/深绿文字）。
-    this.world.add(this.createTextSprite('前货舱门 · FORWARD', { x: cfg.doors.forward.x, y: 2.75, z: outerZ - 0.6 }, 0.5, 0x1257c4));
-    this.world.add(this.createTextSprite('后货舱门 · AFT', { x: cfg.doors.aft.x, y: 2.75, z: outerZ - 0.6 }, 0.5, 0x1257c4));
-    this.world.add(this.createTextSprite('机头 O(0,0,0) → 机尾 +X', { x: 1.0, y: 2.9, z: 0 }, 0.45, 0x0e8f5d));
+    // 门位标牌。
+    this.world.add(this.createTextSprite('前货舱门 · FORWARD', { x, y: h + 0.42, z: outerZ - 0.6 }, 0.5, 0x1257c4));
   }
 
   private buildFloorLayout(): void {
     const cfg = this.config;
-    // 通道边线与地面安全线。
-    const lineMat = new THREE.MeshBasicMaterial({ color: C_AMBER, transparent: true, opacity: 0.28 });
-    for (const z of [cfg.aisleHalfWidth, -cfg.aisleHalfWidth]) {
-      const line = new THREE.Mesh(new THREE.PlaneGeometry(cfg.hold.length, 0.035), lineMat);
-      line.rotation.x = -Math.PI / 2;
-      line.position.set(cfg.hold.length / 2, 0.006, z);
-      this.world.add(line);
-    }
-    // 槽位格 + 编号。
+    // 货舱地板全宽度可放货：按三排货位铺格线，不再绘制 AGV 专用通道。
+    const sideColor: Record<'L' | 'R' | 'C', number> = { L: C_BLUE, R: C_GREEN, C: C_AMBER };
+    const sideInk: Record<'L' | 'R' | 'C', number> = { L: 0x1257c4, R: 0x0a7a4c, C: 0xa8690a };
     for (const cell of slotCells(cfg)) {
+      // 货位格底色：比地板略深，保证亮色主题下也能看出"每块都能放货"。
       const mat = new THREE.MeshBasicMaterial({
-        color: cell.side === 'L' ? C_BLUE : C_GREEN,
+        color: sideColor[cell.side],
         transparent: true,
-        opacity: cell.side === 'L' ? 0.07 : 0.05
+        opacity: cell.side === 'C' ? 0.13 : 0.16
       });
-      const pad = new THREE.Mesh(new THREE.PlaneGeometry(cfg.slotPitch * 0.94, 1.5), mat);
+      const pad = new THREE.Mesh(new THREE.PlaneGeometry(cfg.slotPitch * 0.9, 1.9), mat);
       pad.rotation.x = -Math.PI / 2;
       pad.position.set(cell.x, 0.008, cell.z);
       this.world.add(pad);
+
+      // 格边线（细边框，强化货位边界）。
+      const edgeMat = new THREE.LineBasicMaterial({ color: sideInk[cell.side], transparent: true, opacity: 0.5 });
+      const hw = (cfg.slotPitch * 0.9) / 2;
+      const hd = 1.9 / 2;
+      const edge = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(cell.x - hw, 0.014, cell.z - hd),
+          new THREE.Vector3(cell.x + hw, 0.014, cell.z - hd),
+          new THREE.Vector3(cell.x + hw, 0.014, cell.z + hd),
+          new THREE.Vector3(cell.x - hw, 0.014, cell.z + hd)
+        ]),
+        edgeMat
+      );
+      this.world.add(edge);
+
+      const labelZ = cell.z + (cell.side === 'R' ? 0.72 : cell.side === 'L' ? -0.72 : 0.7);
       const label = this.createTextSprite(
         `${cell.side}${String(cell.column).padStart(2, '0')}`,
-        { x: cell.x, y: 0.02, z: cell.z + (cell.side === 'L' ? -0.32 : 0.32) },
-        0.4,
-        cell.side === 'L' ? C_BLUE : C_GREEN
+        { x: cell.x, y: 0.05, z: labelZ },
+        0.5,
+        sideInk[cell.side]
       );
       this.world.add(label);
     }
@@ -728,7 +899,7 @@ export class FactoryScene {
         fromYaw: mesh.rotation.y,
         toPose: { x: slot.x, y: 0, z: slot.z, yaw: snapYaw },
         progress: 0,
-        duration: 0.9
+        duration: 1.15
       });
       this.cargoManager.finalizePlace(target.cargoId, target.slotId);
     }

@@ -4,9 +4,17 @@
  * 定位（见 docs/方案.md §3/§6）：
  *  - 本模块不是路径规划/避障/调度/排列算法的实现，只是按既定消息契约(AlgorithmEvent)
  *    生成一段"演示剧本"，用于无算法后端时的效果展示与联调占位；
- *  - 几何可行性（列跨度适配、走廊限位、交接位、驻泊分工、避障绕行可通行性）由
+ *  - 几何可行性（列跨度适配、舱门通行、机头空场转场、推入间距、初始装载位置）由
  *    src/utils/layout.ts 与本文件中的演示编排规则共同保证；
  *  - 真实算法接入时由 AlgorithmAdapter 替代本模块作为消息源。
+ *
+ * 当前编排主线（单舱门 / 舱外待命 / 全宽度货位）：
+ *  1. AGV 在前舱门外平台待命，任务下发后**货物直接出现在 AGV 上**（无需人工/平台滑入）；
+ *  2. AGV 载货穿前舱门进舱（门洞净高按载货高度配置，保证不超高）；
+ *  3. 在机头空场完成跨排横向转场，再沿目标排驶到目标列**前方**；
+ *  4. 货物沿 +X 推入货位（AGV 本体不进入货位，避免与已装货柜干涉）；
+ *  5. AGV 退回舱外待命位，等待下一条任务。
+ * 货位从机尾向机头方向填充，因此 AGV 进出路径始终只经过空货位。
  */
 import type { CargoConfig } from '@/config/cargo';
 import type {
@@ -21,7 +29,15 @@ import type {
   SceneProbe,
   TransportTask
 } from '@/types/cargo';
-import { agvRoles, handoffPose, parseSlotId, platformPose, rackXEnd, rackXStart, slotCellOf } from '@/utils/layout';
+import {
+  PLACE_PUSH,
+  agvRoles,
+  dockPose,
+  entryPose,
+  frontLaneX,
+  parseSlotId,
+  slotCellOf
+} from '@/utils/layout';
 
 export interface MockSchedulerOptions {
   emit: (event: AlgorithmEvent) => void;
@@ -33,11 +49,7 @@ const ARRIVE_DIST = 0.16;
 const ARRIVE_YAW = 0.18;
 const MAX_LEG_WAIT_MS = 40000;
 const POLL_MS = 80;
-
-/** 载货走廊车道偏置：L 槽位走 +Z 车道，R 槽位走 -Z 车道（|Z|≤0.5 保证与两侧已放货柜干涉）。 */
-function laneZOf(side: 'L' | 'R'): number {
-  return side === 'L' ? 0.5 : -0.5;
-}
+const DOOR: DoorId = 'forward';
 
 function poseDist(a: Pose3, b: Pose3): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
@@ -73,9 +85,9 @@ interface ItemJob {
   cargoType: CargoType;
   slotId: string;
   column: number;
-  side: 'L' | 'R';
+  side: 'L' | 'R' | 'C';
   agvId: string;
-  doorId: DoorId;
+  home: Pose3;
 }
 
 export class MockScheduler {
@@ -99,12 +111,12 @@ export class MockScheduler {
 
   start(): void {
     agvRoles(this.config()).forEach((role) => this.emitAgv(role.id, { phase: 'idle' }));
-    this.emitLog('info', '演示编排源已就绪：请选择装载模式并下发任务');
+    this.emitLog('info', '演示编排源已就绪：AGV 已在前舱门外待命，请下发装载任务');
   }
 
   dispose(): void {
     this.disposed = true;
-    this.current?.token && (this.current.token.cancelled = true);
+    if (this.current) this.current.token.cancelled = true;
     this.queue.length = 0;
     this.current = null;
   }
@@ -153,7 +165,7 @@ export class MockScheduler {
         break;
       case 'door:override':
         this.emit({ type: 'door:set', payload: { doorId: command.doorId, state: command.state } });
-        this.emitLog('info', `${command.doorId === 'forward' ? '前货舱门' : '后货舱门'}手动${command.state === 'open' ? '开启' : '关闭'}`);
+        this.emitLog('info', `前货舱门手动${command.state === 'open' ? '开启' : '关闭'}`);
         break;
       case 'config:change':
         break;
@@ -181,60 +193,50 @@ export class MockScheduler {
     this.queue.length = 0;
   }
 
-  /** 任务执行：按槽位把货物分派给对应 AGV（多机并行，单机全程串行）。 */
+  /**
+   * 任务执行：货物按件分配给 AGV（多车时轮转分配）。
+   * 只有一扇前舱门，故货物**串行**通过舱门——避免两台车在门洞互相遮挡/穿插。
+   */
   private async executeTask(task: TransportTask, token: RunToken): Promise<void> {
     const cfg = this.config();
-    this.emitTask(task.id, 'running', 0, task.mode === 'multi' ? '多货物同时装载开始' : '单货物装载开始');
-    this.emitLog('info', `任务 ${task.id} 开始：${task.mode === 'single' ? '单货物装载' : `多货物同时装载（${task.items.length} 件）`}`);
+    this.emitTask(task.id, 'running', 0, task.mode === 'multi' ? '多货物装载开始' : '单货物装载开始');
+    this.emitLog('info', `任务 ${task.id} 开始：${task.mode === 'single' ? '单货物装载' : `多货物装载（${task.items.length} 件）`}`);
 
     const jobs = this.buildJobs(task, cfg);
     if (jobs.length === 0) {
-      this.emitTask(task.id, 'failed', 0, '无可用的适配槽位');
+      this.emitTask(task.id, 'failed', 0, '无可用的适配货位');
       return;
     }
 
-    const perAgv = new Map<string, ItemJob[]>();
-    for (const job of jobs) {
-      if (!perAgv.has(job.agvId)) perAgv.set(job.agvId, []);
-      perAgv.get(job.agvId)!.push(job);
-    }
+    // 开门：整任务期间保持开启，任务结束后关闭。
+    this.emit({ type: 'door:set', payload: { doorId: DOOR, state: 'open' } });
+    await this.waitDoorOpen(this.probe(), DOOR, token);
 
     const total = jobs.length;
     let done = 0;
-    const runners = [...perAgv.entries()].map(([agvId, agvJobs]) =>
-      this.runAgvSequence(agvId, agvJobs, task.id, token).finally(() => {
-        if (token.cancelled) return;
-        done += agvJobs.length;
-        this.emitTask(task.id, 'running', Math.min(0.97, done / total));
-      })
-    );
-    try {
-      await Promise.all(runners);
-    } catch {
-      // 单个执行器异常已在 runAgvSequence 中上报 task:state failed，此处吞掉避免未处理拒绝。
-      if (token.cancelled) return;
+    for (const job of jobs) {
+      if (token.cancelled) break;
+      await this.runItem(job, task.id, token);
+      done += 1;
+      if (!token.cancelled) this.emitTask(task.id, 'running', Math.min(0.97, done / total));
     }
     if (token.cancelled) return;
 
     this.emitTask(task.id, 'done', 1, '任务完成');
     this.emitLog('info', `任务 ${task.id} 完成：${total} 件货物已排列放置`);
-    (['forward', 'aft'] as DoorId[]).forEach((doorId) => this.emit({ type: 'door:set', payload: { doorId, state: 'close' } }));
+    this.emit({ type: 'door:set', payload: { doorId: DOOR, state: 'close' } });
     this.emit({ type: 'path:plan', payload: { agvId: jobs[0].agvId, waypoints: [] } });
   }
 
   private buildJobs(task: TransportTask, cfg: CargoConfig): ItemJob[] {
     const roles = agvRoles(cfg);
-    const half = Math.ceil(cfg.slotCount / 2);
     const jobs: ItemJob[] = [];
-    for (const item of task.items) {
-      if (!item.slotId) continue;
+    task.items.forEach((item, index) => {
+      if (!item.slotId) return;
       const parsed = parseSlotId(item.slotId);
       const cell = parsed ? slotCellOf(cfg, item.slotId) : null;
-      if (!parsed || !cell) continue;
-      const doorId: DoorId = parsed.column < half ? 'forward' : 'aft';
-      const role =
-        roles.find((r) => parsed.column >= r.fromColumn && parsed.column < r.toColumn) ??
-        roles[0];
+      if (!parsed || !cell) return;
+      const role = roles[index % roles.length];
       const cargoId = `C${this.cargoSeq++}`;
       jobs.push({
         cargoId,
@@ -244,148 +246,129 @@ export class MockScheduler {
         column: parsed.column,
         side: parsed.side,
         agvId: role.id,
-        doorId
+        home: role.home
       });
-    }
+    });
     return jobs;
   }
 
-  /** 单台 AGV 顺序执行一组货物。 */
-  private async runAgvSequence(agvId: string, jobs: ItemJob[], taskId: string, token: RunToken): Promise<void> {
-    for (const job of jobs) {
-      if (token.cancelled) return;
-      this.emit({ type: 'slot:mark', payload: { slotId: job.slotId, state: 'pending' } });
-      this.emitAgv(agvId, { phase: 'toPickup', taskId, cargoId: job.cargoId, cargoType: job.cargoType });
-      try {
-        await this.handleItem(agvId, job, token);
-        if (!token.cancelled) {
-          this.emit({ type: 'slot:mark', payload: { slotId: job.slotId, state: 'clear' } });
-          this.emitAgv(agvId, { phase: 'done', taskId, cargoId: null, cargoType: null });
-        }
-      } catch (error) {
-        if (token.cancelled) return;
-        this.emitAgv(agvId, { phase: 'error', taskId, cargoId: null, cargoType: null });
-        this.emitTask(taskId, 'failed', 0, `${agvId} 执行异常：${String(error)}`);
-        this.emitLog('error', `${agvId} 任务异常：${String(error)}`);
-        throw error;
-      }
-    }
-    this.emitAgv(agvId, { phase: 'idle', taskId: undefined, cargoId: null, cargoType: null });
-  }
-
-  /** 单件货物的完整演示流程：开舱门→货物滑入→空驶取货→载货运输(可避障)→入位→完成。 */
-  private async handleItem(agvId: string, job: ItemJob, token: RunToken): Promise<void> {
+  /** 单件货物：舱外上货 → 载货穿门进舱 → 推入货位 → 退回舱外。 */
+  private async runItem(job: ItemJob, taskId: string, token: RunToken): Promise<void> {
     const cfg = this.config();
     const probe = this.probe();
     if (!probe) throw new Error('场景探针未就绪');
-    const { cargoId, cargoName, cargoType, slotId, side, doorId } = job;
-    const handoff = handoffPose(cfg, doorId);
-    // 载货走廊限位：宽体货（PMX/PAX）沿中线 Z=0 行驶（其半宽可达 0.99，两侧货柜内缘最窄约 ±1.21），
-    // 标准 AKE 走车道 ±0.5；入位横移均在目标列完成。
-    const wide = cfg.uld[cargoType].width > 1.6;
-    const lane = wide ? 0 : laneZOf(side);
-    this.emitLog('info', `编排：${agvId} 装载 ${cargoName} → ${slotId}（${doorId === 'forward' ? '前' : '后'}货舱门）`);
+    const { agvId, cargoId, cargoName, cargoType, slotId, home } = job;
+    const target = slotCellOf(cfg, slotId);
+    if (!target) throw new Error(`货位 ${slotId} 不存在`);
 
-    // 1) 开舱门（等待门扇基本开启后货物再进舱），货物在平台生成并滑入交接位。
-    this.emit({ type: 'door:set', payload: { doorId, state: 'open' } });
-    await this.waitDoorOpen(probe, doorId, token);
-    this.emit({ type: 'cargo:spawn', payload: { cargoId, cargoType, pose: platformPose(cfg, doorId) } });
-    this.emit({ type: 'cargo:state', payload: { cargoId, status: 'waiting', slotId: null, cargoType } });
-    this.emit({ type: 'cargo:move', payload: { cargoId, pose: handoff } });
-    this.emitLog('info', `${cargoName} 经舱门滑入舱内交接位`);
+    this.emit({ type: 'slot:mark', payload: { slotId, state: 'pending' } });
+    try {
+      // 1) 货物直接出现在舱外待命的 AGV 上。
+      this.emitAgv(agvId, { phase: 'toPickup', taskId, cargoId, cargoType });
+      const agvPose = probe.agvPose(agvId) ?? home;
+      const platformY = 0.67;
+      this.emit({
+        type: 'cargo:spawn',
+        payload: { cargoId, cargoType, pose: { x: agvPose.x, y: platformY, z: agvPose.z, yaw: 0 } }
+      });
+      this.emit({ type: 'cargo:state', payload: { cargoId, status: 'waiting', slotId: null, cargoType } });
+      this.emitLog('info', `${cargoName} 已装到 ${agvId} 车上（舱外待命位）`);
 
-    // 2) AGV 空驶到交接位（汇入走廊中线后经门区空场进入）。
-    const emptyRoute = this.routeEmptyToHandoff(cfg, agvId, doorId);
-    await this.driveRoute(agvId, emptyRoute, token);
+      this.emitAgv(agvId, { phase: 'pickup', taskId, cargoId, cargoType });
+      this.emit({ type: 'cargo:pickup', payload: { agvId, cargoId } });
+      this.sendCommand({ agvId, type: 'pick' });
+      await this.sleep(420, token);
+      this.emit({ type: 'cargo:state', payload: { cargoId, status: 'inTransit', slotId: null, cargoType } });
+      this.emitAgv(agvId, { phase: 'transport', taskId, cargoId, cargoType });
 
-    // 3) 等货物滑入到位后取货。
-    this.emitAgv(agvId, { phase: 'pickup', taskId: token.taskId, cargoId, cargoType });
-    await this.waitCargoAt(probe, cargoId, handoff, token, 10000);
-    this.emit({ type: 'cargo:pickup', payload: { agvId, cargoId } });
-    this.sendCommand({ agvId, type: 'pick' });
-    await this.sleep(600, token);
-    this.emit({ type: 'cargo:state', payload: { cargoId, status: 'inTransit', slotId: null, cargoType } });
-    this.emitAgv(agvId, { phase: 'transport', taskId: token.taskId, cargoId, cargoType });
-    this.emitLog('info', `${agvId} 已取货 ${cargoName}，沿载货走廊运输`);
+      // 2) 载货穿前舱门进舱 → 机头空场转场 → 目标列前方。
+      const inbound = this.routeInbound(cfg, agvId, home, target.x, target.z, target.column);
+      this.emit({ type: 'path:plan', payload: { agvId, waypoints: inbound.waypoints } });
+      if (inbound.obstacle) {
+        this.emit({ type: 'obstacle:event', payload: inbound.obstacle });
+        this.emitLog('warn', `${agvId} 舱内转场遇障，绕行重规划`);
+      }
+      await this.driveRoute(agvId, inbound.waypoints, token);
 
-    // 4) 载货沿走廊到目标列（含横向过渡与避障绕行）。
-    const target = slotCellOf(cfg, slotId)!;
-    const loaded = this.routeLoadedToColumn(agvId, cfg, doorId, target.x, lane, wide);
-    this.emit({ type: 'path:plan', payload: { agvId, waypoints: loaded.waypoints } });
-    if (loaded.obstacle) {
-      this.emit({ type: 'obstacle:event', payload: loaded.obstacle });
-      this.emitLog('warn', `${agvId} 货载路径检测到障碍，重规划绕行`);
+      // 3) 到位推入货位。
+      this.emitAgv(agvId, { phase: 'placing', taskId, cargoId, cargoType });
+      this.emit({ type: 'cargo:place', payload: { agvId, cargoId, slotId } });
+      this.sendCommand({ agvId, type: 'place' });
+      await this.sleep(300, token);
+      await this.waitCargoAt(probe, cargoId, { x: target.x, y: 0, z: target.z, yaw: 0 }, token, 9000);
+      this.emit({ type: 'cargo:state', payload: { cargoId, status: 'placed', slotId, cargoType } });
+      this.emitLog('info', `${cargoName} 已推入货位 ${slotId}`);
+
+      // 4) 退回舱外待命位。
+      const outbound = this.routeOutbound(cfg, home, target.x, target.z);
+      this.emitAgv(agvId, { phase: 'done', taskId, cargoId: null, cargoType: null });
+      await this.driveRoute(agvId, outbound, token);
+      this.emit({ type: 'slot:mark', payload: { slotId, state: 'clear' } });
+    } catch (error) {
+      if (token.cancelled) return;
+      this.emitAgv(agvId, { phase: 'error', taskId, cargoId: null, cargoType: null });
+      this.emitTask(taskId, 'failed', 0, `${agvId} 执行异常：${String(error)}`);
+      this.emitLog('error', `${agvId} 任务异常：${String(error)}`);
+      throw error;
     }
-    await this.driveRoute(agvId, loaded.waypoints, token);
-
-    // 5) 到位入位：横向滑移放置。
-    this.emitAgv(agvId, { phase: 'placing', taskId: token.taskId, cargoId, cargoType });
-    this.emit({ type: 'cargo:place', payload: { agvId, cargoId, slotId } });
-    this.sendCommand({ agvId, type: 'place' });
-    await this.sleep(450, token);
-    await this.waitCargoAt(probe, cargoId, { x: target.x, y: 0, z: target.z, yaw: 0 }, token, 9000);
-    this.emit({ type: 'cargo:state', payload: { cargoId, status: 'placed', slotId, cargoType } });
-    this.emitLog('info', `${cargoName} 已排列放置至 ${slotId}`);
   }
 
   // ---------------------------------------------------------------------------
-  // 演示路径编排（几何规则 docs/方案.md §6.6；全部基于 config 计算）
+  // 演示路径编排（全部基于 config 计算）
   // ---------------------------------------------------------------------------
 
   /**
-   * 空驶到指定门交接位：
-   *  - AGV 当前在走廊车道 |z|=0.5 时先汇入中线（空车可在货柜区中线上行驶）；
-   *  - 若 AGV 不在该门空场内（需穿越货柜区），先沿中线到达门区空场边缘；
-   *  - 门轴横向进入交接位（z0 → -1.0）为空场段。
+   * 入舱路线：舱外待命位 → 门洞正前方对位 → 穿门进舱 → 机头空场横向转场 → 目标列前方停位。
+   * 目标排若在中央/左舷（需要跨过 Z=0 转场），则在该空场插入一次绕障演示。
    */
-  private routeEmptyToHandoff(cfg: CargoConfig, agvId: string, doorId: DoorId): Pose3[] {
-    const cur = this.probe()?.agvPose(agvId) ?? null;
-    const doorX = cfg.doors[doorId].x;
-    const stagingLimit = doorId === 'forward' ? rackXStart(cfg) - 0.5 : rackXEnd(cfg) + 0.5;
-    const pts: Array<{ x: number; z: number }> = [];
-    if (cur) {
-      if (Math.abs(cur.z) > 0.45) pts.push({ x: cur.x, z: 0 });
-      const needsCross = doorId === 'forward' ? cur.x > stagingLimit : cur.x < stagingLimit;
-      if (needsCross) pts.push({ x: stagingLimit, z: 0 });
-    }
-    pts.push({ x: doorX, z: 0 });
-    pts.push({ x: doorX, z: -1.0 });
-    return this.toPoses(pts, doorId === 'forward' ? 0 : Math.PI);
-  }
-
-  /**
-   * 载货路线：交接位 →(过渡点: 在门区空场完成横向入车道)→ 载货走廊(车道 |Z|=0.5) → 目标列车道位。
-   * 障碍演示：交接位→过渡点斜线中段设障，绕行点从障碍靠墙深位通过（门区空场可通行）。
-   */
-  private routeLoadedToColumn(
-    agvId: string,
+  private routeInbound(
     cfg: CargoConfig,
-    doorId: DoorId,
+    agvId: string,
+    home: Pose3,
     targetX: number,
-    lane: number,
-    wide: boolean
+    targetZ: number,
+    column: number
   ): { waypoints: Pose3[]; obstacle: { agvId: string; pose: Pose3; radius: number } | null } {
-    const doorX = cfg.doors[doorId].x;
-    // 横向入车道过渡点必须落在门区空场内（货柜区外缘留 ≥0.9m 余量）。
-    const transX = doorId === 'forward' ? rackXStart(cfg) - 0.9 : rackXEnd(cfg) + 1.5;
-    const midX = (doorX + transX) / 2;
-    // 宽体货载不演示深位绕行（其外缘贴近舱壁，绕行点不可通行）。
-    const useDetour = !wide && Math.abs(targetX - doorX) > 1.2;
-    const obstacle = useDetour
-      ? { agvId, pose: { x: midX, y: 0, z: -1.15, yaw: 0 }, radius: 0.4 }
-      : null;
-    const pts: Array<{ x: number; z: number }> = [];
-    if (useDetour) {
-      // 靠墙深位绕行点：仍在门区空场（z=-2.55，货载半宽 0.767 下外缘约 -3.32，距舱壁内沿 -3.4 留余量）。
-      pts.push({ x: midX, z: -2.55 });
-      pts.push({ x: transX, z: lane });
+    const dock = dockPose(cfg);
+    const entry = entryPose(cfg);
+    const laneX = frontLaneX(cfg);
+    const stopX = targetX - PLACE_PUSH;
+    const crossesCenter = targetZ > -0.1 && column >= 1;
+    const pts: Array<{ x: number; z: number }> = [
+      { x: home.x, z: home.z },
+      { x: dock.x, z: dock.z },
+      { x: entry.x, z: entry.z },
+      { x: laneX, z: entry.z }
+    ];
+    if (crossesCenter) {
+      // 绕障：在机头空场内先向机头方向让开一段，再横向转到目标排。
+      pts.push({ x: laneX - 0.8, z: entry.z });
+      pts.push({ x: laneX - 0.8, z: targetZ });
+      pts.push({ x: laneX, z: targetZ });
     } else {
-      pts.push({ x: transX, z: lane });
+      pts.push({ x: laneX, z: targetZ });
     }
-    pts.push({ x: targetX, z: lane });
+    pts.push({ x: stopX, z: targetZ });
+    return {
+      waypoints: this.toPoses(pts, 0),
+      obstacle: crossesCenter ? { agvId, pose: { x: laneX, y: 0, z: 0, yaw: 0 }, radius: 0.45 } : null
+    };
+  }
 
-    const waypoints = this.toPoses(pts, doorId === 'forward' ? 0 : Math.PI);
-    return { waypoints, obstacle };
+  /** 出舱路线：目标列前方 → 机头空场 → 穿门 → 舱外待命位。 */
+  private routeOutbound(cfg: CargoConfig, home: Pose3, targetX: number, targetZ: number): Pose3[] {
+    const dock = dockPose(cfg);
+    const entry = entryPose(cfg);
+    const laneX = frontLaneX(cfg);
+    const pts: Array<{ x: number; z: number }> = [
+      { x: targetX - PLACE_PUSH, z: targetZ },
+      { x: laneX, z: targetZ },
+      { x: laneX, z: entry.z },
+      { x: entry.x, z: entry.z },
+      { x: dock.x, z: dock.z },
+      { x: home.x, z: home.z }
+    ];
+    return this.toPoses(pts, home.yaw);
   }
 
   private toPoses(pts: Array<{ x: number; z: number }>, finalYaw: number): Pose3[] {
@@ -434,15 +417,15 @@ export class MockScheduler {
     }
   }
 
-  private async waitDoorOpen(probe: SceneProbe, doorId: DoorId, token: RunToken): Promise<void> {
-    if (!probe.doorProgress) return;
+  private async waitDoorOpen(probe: SceneProbe | null, doorId: DoorId, token: RunToken): Promise<void> {
+    if (!probe?.doorProgress) return;
     const start = Date.now();
     for (;;) {
       if (token.cancelled) return;
       await this.pauseGate(token);
       const progress = probe.doorProgress(doorId);
       if (progress === null || progress >= 0.9) return;
-      if (Date.now() - start > 12000) throw new Error(`${doorId} 舱门开启超时`);
+      if (Date.now() - start > 12000) throw new Error('舱门开启超时');
       await this.sleep(POLL_MS, token);
     }
   }

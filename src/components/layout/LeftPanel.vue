@@ -37,7 +37,7 @@
             </span>
           </div>
         </div>
-        <div class="card-title sub">槽位与通道</div>
+        <div class="card-title sub">货位排布（全舱宽度可放货，无专用通道）</div>
         <div class="field-grid">
           <div v-for="field in slotFields" :key="field.key" class="c-field">
             <label>{{ field.label }}</label>
@@ -47,15 +47,32 @@
             </span>
           </div>
         </div>
+        <div class="card-title sub">机身外形</div>
+        <div class="field-grid">
+          <div class="c-field">
+            <label>机头锥段长</label>
+            <span class="input-wrap">
+              <input v-model.number="noseProxy['length']" type="number" class="c-input" step="0.5" min="0" />
+              <span class="unit">m</span>
+            </span>
+          </div>
+          <div class="c-field">
+            <label>机尾锥段长</label>
+            <span class="input-wrap">
+              <input v-model.number="tailProxy['length']" type="number" class="c-input" step="0.5" min="0" />
+              <span class="unit">m</span>
+            </span>
+          </div>
+        </div>
       </section>
 
-      <!-- 舱门 -->
+      <!-- 舱门（仅一个前舱门） -->
       <section class="card">
-        <div class="card-title">舱门（右舷 -Z · 位置/洞口尺寸）</div>
+        <div class="card-title">前货舱门（右舷 -Z · 位置/洞口尺寸）</div>
         <div class="door-grid">
-          <div v-for="door in (['forward', 'aft'] as const)" :key="door" class="door-box">
+          <div v-for="door in (['forward'] as const)" :key="door" class="door-box">
             <div class="door-head">
-              <strong>{{ door === 'forward' ? '前货舱门' : '后货舱门' }}</strong>
+              <strong>前货舱门</strong>
               <span class="c-chip" :class="store.doors[door] === 'open' ? 'green' : 'gray'">
                 {{ store.doors[door] === 'open' ? '已开启' : '已关闭' }}
               </span>
@@ -71,6 +88,7 @@
               <button class="c-btn sm" :disabled="store.mode !== 'mock'" @click="store.setDoor(door, 'open')">开门</button>
               <button class="c-btn sm" :disabled="store.mode !== 'mock'" @click="store.setDoor(door, 'close')">关门</button>
             </div>
+            <div class="hint dim">门洞净高需 ≥ 载货总高（约 2.3 m），否则载货 AGV 无法穿门进舱。</div>
           </div>
         </div>
       </section>
@@ -143,7 +161,9 @@ function cloneConfig(c: CargoConfig): CargoConfig {
 const form = reactive<CargoConfig>(cloneConfig(store.config));
 /** 数字控件代理（放宽 key 类型便于模板动态索引）。 */
 const uldProxy = form.uld as unknown as Record<string, Record<string, number>>;
-const doorProxy = form.doors as unknown as Record<'forward' | 'aft', Record<string, number>>;
+const doorProxy = form.doors as unknown as Record<'forward', Record<string, number>>;
+const noseProxy = form.nose as unknown as Record<string, number>;
+const tailProxy = form.tail as unknown as Record<string, number>;
 const holdProxy = form.hold as unknown as Record<string, number>;
 const agvProxy = form.agv as unknown as Record<string, number>;
 
@@ -151,14 +171,14 @@ const agvProxy = form.agv as unknown as Record<string, number>;
 function syncForm() {
   const c = store.config;
   form.hold = { ...c.hold };
-  form.aisleHalfWidth = c.aisleHalfWidth;
+  form.nose = { ...c.nose };
+  form.tail = { ...c.tail };
   form.slotZ = c.slotZ;
   form.slotPitch = c.slotPitch;
   form.slotStartX = c.slotStartX;
   form.slotCount = c.slotCount;
   form.initialAkePerSide = c.initialAkePerSide;
   form.doors.forward = { ...c.doors.forward };
-  form.doors.aft = { ...c.doors.aft };
   form.agv = { ...c.agv };
   form.uld = {
     AKE: { ...c.uld.AKE },
@@ -184,12 +204,11 @@ const holdFields: FieldDef[] = [
   { key: 'wallThickness', label: '舱壁厚度', step: 0.02, min: 0.05 }
 ];
 const slotFields: FieldDef[] = [
-  { key: 'aisleHalfWidth', label: '通道半宽', step: 0.05, min: 0.3 },
-  { key: 'slotZ', label: '货位中心 Z', step: 0.1, min: 0.5 },
+  { key: 'slotZ', label: '左右两排 Z', step: 0.1, min: 0.5 },
   { key: 'slotPitch', label: '货位列距', step: 0.05, min: 0.5 },
   { key: 'slotStartX', label: '首列 X', step: 0.1, min: 0.5 },
-  { key: 'slotCount', label: '每侧列数', step: 1, min: 1, unit: '列' },
-  { key: 'initialAkePerSide', label: '初始 AKE/侧', step: 1, min: 0, unit: '件' }
+  { key: 'slotCount', label: '每排列数', step: 1, min: 1, unit: '列' },
+  { key: 'initialAkePerSide', label: '初始 AKE/排', step: 1, min: 0, unit: '件' }
 ];
 const doorFields: FieldDef[] = [
   { key: 'x', label: '中心 X', step: 0.1, min: 0.5 },
@@ -213,15 +232,15 @@ const uldFields: FieldDef[] = [
 function patchFromForm(): Partial<CargoConfig> {
   return {
     hold: { ...form.hold },
-    aisleHalfWidth: form.aisleHalfWidth,
+    nose: { ...form.nose },
+    tail: { ...form.tail },
     slotZ: form.slotZ,
     slotPitch: form.slotPitch,
     slotStartX: form.slotStartX,
     slotCount: Math.max(1, Math.round(form.slotCount)),
     initialAkePerSide: Math.max(0, Math.round(form.initialAkePerSide)),
     doors: {
-      forward: { ...form.doors.forward } as DoorSpec,
-      aft: { ...form.doors.aft } as DoorSpec
+      forward: { ...form.doors.forward } as DoorSpec
     },
     agv: { ...form.agv, count: Math.max(1, Math.round(form.agv.count)) },
     uld: {

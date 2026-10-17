@@ -292,10 +292,11 @@ export class AGVTransportManager {
         runtime.speed = 0;
         break;
       case 'pick': {
-        // AGV 已抵达货物位，顶升托盘抬起并挂载货物（挂载由场景 onAction 完成）。
+        // 货物直接落到顶升平台上挂载（挂载由场景 onAction 完成）。
+        // 注意：载货行进时顶升台保持基准高度，否则 AGV+货物总高会超过舱门净高。
         runtime.queue.shift();
         runtime.carrying = true;
-        runtime.liftTarget = runtime.liftHeight;
+        runtime.liftTarget = 0;
         runtime.speed = 0;
         this.runAction(runtime, 'pick');
         break;

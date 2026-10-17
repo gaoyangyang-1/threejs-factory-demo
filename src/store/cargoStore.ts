@@ -18,7 +18,7 @@ import type {
   TaskMode,
   TaskStatus
 } from '@/types/cargo';
-import { agvRoles, fitSlotOf, initialCargoSpecs, parseSlotId, slotCells, slotSpanOf } from '@/utils/layout';
+import { agvRoles, fitSlotOf, initialCargoSpecs, parseSlotId, slotCells, slotSpanOf, SLOT_SIDE_ORDER } from '@/utils/layout';
 import { formatClock, createId } from '@/utils/time';
 import { transportBus } from '@/websocket/TransportMessageBus';
 
@@ -59,7 +59,7 @@ export interface LogRow {
 
 export interface SlotTile {
   slotId: string;
-  side: 'L' | 'R';
+  side: 'L' | 'R' | 'C';
   column: number;
   state: 'free' | 'occupied' | 'pending' | 'selected';
 }
@@ -113,7 +113,7 @@ export const useCargoStore = defineStore('cargo', {
     tasks: [] as TaskRow[],
     agvs: [] as AgvRow[],
     cargos: [] as CargoRow[],
-    doors: { forward: 'close', aft: 'close' } as Record<DoorId, DoorState>,
+    doors: { forward: 'close' } as Record<DoorId, DoorState>,
     logs: [] as LogRow[],
     pendingSlots: [] as string[],
     selectedSlotId: null as string | null
@@ -122,8 +122,8 @@ export const useCargoStore = defineStore('cargo', {
     activeTaskCount: (state) => state.tasks.filter((t) => t.status === 'running' || t.status === 'queued').length,
     doneTaskCount: (state) => state.tasks.filter((t) => t.status === 'done').length,
     agvBusyCount: (state) => state.agvs.filter((a) => a.phase !== 'idle').length,
-    /** 本舱货物槽位数（L+R）。 */
-    slotCountTotal: (state) => state.config.slotCount * 2,
+    /** 本舱货位总数（左舷 + 右舷 + 中央三排）。 */
+    slotCountTotal: (state) => state.config.slotCount * 3,
     freeSlotCount(state): number {
       const occupied = occupiedSetOf(state.config, state.cargos);
       const pending = new Set(state.pendingSlots);
@@ -149,7 +149,9 @@ export const useCargoStore = defineStore('cargo', {
     boot() {
       this.rebuildAgvRows();
       this.seedCargos();
-      this.pushLog('info', '系统初始化完成，演示编排源已就绪');
+      // 冷启动即进入运行态：公网访客打开页面无需先点「启动」即可直接下发任务。
+      this.runState = 'running';
+      this.pushLog('info', '系统初始化完成：AGV 已在前舱门外待命，可直接下发装载任务');
     },
 
     connectSource(mode: AlgorithmSourceMode, url?: string) {
@@ -249,7 +251,7 @@ export const useCargoStore = defineStore('cargo', {
           this.pendingSlots = [];
           this.seedCargos();
           this.rebuildAgvRows();
-          this.doors = { forward: 'close', aft: 'close' };
+          this.doors = { forward: 'close' };
           this.pushLog('warn', '收到算法端场景重建指令，布局已按算法配置重置');
           break;
         }
@@ -272,7 +274,7 @@ export const useCargoStore = defineStore('cargo', {
       this.runState = 'idle';
       this.tasks = [];
       this.pendingSlots = [];
-      this.doors = { forward: 'close', aft: 'close' };
+      this.doors = { forward: 'close' };
       this.epoch++;
       this.seedCargos();
       this.logs = [];
@@ -290,7 +292,7 @@ export const useCargoStore = defineStore('cargo', {
       this.runState = 'idle';
       this.tasks = [];
       this.pendingSlots = [];
-      this.doors = { forward: 'close', aft: 'close' };
+      this.doors = { forward: 'close' };
       this.epoch++;
       this.seedCargos();
       this.rebuildAgvRows();
@@ -347,8 +349,8 @@ export const useCargoStore = defineStore('cargo', {
       const isFree = (slotId: string) => !occupied.has(slotId) && !pending.has(slotId);
       const span = slotSpanOf(this.config, type);
       const result: string[] = [];
-      for (const side of ['L', 'R'] as const) {
-        for (let start = 0; start + span <= this.config.slotCount; start++) {
+      for (const side of SLOT_SIDE_ORDER) {
+        for (let start = this.config.slotCount - span; start >= 0; start -= 1) {
           let ok = true;
           for (let c = start; c < start + span; c++) {
             if (!isFree(slotIdOf(side, c))) {
@@ -386,7 +388,7 @@ export const useCargoStore = defineStore('cargo', {
         const isFree = (slotId: string) => !occupied.has(slotId) && !this.pendingSlots.includes(slotId);
         if (input.mode === 'single') {
           const prefer = input.slotId && isFree(input.slotId) ? input.slotId : null;
-          const slotId = prefer ?? fitSlotOf(this.config, input.type, isFree, 'L') ?? fitSlotOf(this.config, input.type, isFree, 'R');
+          const slotId = prefer ?? fitSlotOf(this.config, input.type, isFree);
           if (!slotId) {
             this.pushLog('warn', `货舱内没有适配 ${ULD_META[input.type].label} 的空闲货位`);
             return null;
@@ -397,7 +399,8 @@ export const useCargoStore = defineStore('cargo', {
           const count = Math.max(2, Math.min(6, input.count ?? 3));
           for (let i = 0; i < count; i++) {
             const type = i % 2 === 0 ? input.type : 'AKE';
-            const slotId = fitSlotOf(this.config, type, isFree, i % 2 === 0 ? 'L' : 'R');
+            const side = SLOT_SIDE_ORDER[i % SLOT_SIDE_ORDER.length];
+            const slotId = fitSlotOf(this.config, type, isFree, side);
             if (!slotId) break;
             this.reserveSpan(type, slotId);
             items.push({ cargoType: type, slotId });
@@ -459,7 +462,7 @@ export const useCargoStore = defineStore('cargo', {
       this.agvs = roles.map((role) => ({
         id: role.id,
         name: `转运AGV ${role.id.replace('AGV-', '')}`,
-        role: role.fromColumn === 0 ? '机头空场 · 前舱门装卸' : '机尾空场 · 后舱门装卸',
+        role: role.roleLabel,
         phase: 'idle' as AgvPhase,
         taskId: null,
         cargoId: null,

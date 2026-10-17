@@ -1,7 +1,7 @@
 /**
  * 飞机货运 AGV 智能运输领域类型（消息契约的唯一依据，见 docs/方案.md §4）。
- * 坐标系（机体右手系，硬约束）：机头为原点 O(0,0,0)，+X 逆航向指向机尾，
- * +Y 竖直向上（地板上表面 Y=0），+Z 指向飞行方向左侧（左舷）。
+ * 坐标系（机体右手系，硬约束）：货舱前隔板为原点 O(0,0,0)，+X 指向机尾，
+ * +Y 竖直向上（地板上表面 Y=0），+Z 指向前方左侧（左舷）；机头锥段位于 X<0。
  * 单位统一为米；与 three.js 场景坐标同构，无需轴重映射。
  * 方向语义：yaw=0 朝向 +X；yaw=+π/2 朝向 -Z；yaw=-π/2 朝向 +Z。
  */
@@ -17,7 +17,8 @@ export interface Pose3 {
 /** 标准货柜/货盘类型：AKE(LD-3 集装箱)、PMX/PAX(托盘)。 */
 export type CargoType = 'AKE' | 'PMX' | 'PAX';
 
-export type DoorId = 'forward' | 'aft';
+/** 仅保留一个前货舱门（右舷 -Z 侧壁）。 */
+export type DoorId = 'forward';
 export type DoorState = 'open' | 'close';
 
 /** 外部算法下发的 AGV 增量指令类型。 */

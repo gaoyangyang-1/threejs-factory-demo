@@ -25,7 +25,7 @@ export interface DoorSpec {
 }
 
 export interface CargoConfig {
-  /** 货舱尺寸。length 起于机头 X=0，止于机尾 X=length。 */
+  /** 货舱尺寸。length 起于货舱前隔板 X=0，止于机尾隔板 X=length。 */
   hold: {
     length: number;
     floorWidth: number;
@@ -34,9 +34,15 @@ export interface CargoConfig {
     /** 舱壁厚度(m)，决定侧壁外沿 Z 坐标。 */
     wallThickness: number;
   };
-  /** 中央 AGV 通道半宽(±Z，油漆示意)。 */
-  aisleHalfWidth: number;
-  /** 单侧 rack 槽位排中心 Z。 */
+  /** 机头锥段长度（自货舱前隔板沿 -X 延伸，纯外形，含驾驶舱舷窗）。 */
+  nose: {
+    length: number;
+  };
+  /** 机尾锥段长度（自货舱后隔板沿 +X 延伸，纯外形）。 */
+  tail: {
+    length: number;
+  };
+  /** 左舷/右舷两排货位的 |Z|（中央排固定 Z=0）。 */
   slotZ: number;
   /** 槽位轴向间距。 */
   slotPitch: number;
@@ -46,9 +52,9 @@ export interface CargoConfig {
   slotCount: number;
   /** 初始装载 AKE 数（每侧，自机头方向起算）。 */
   initialAkePerSide: number;
+  /** 仅保留一个前货舱门（右舷 -Z 侧壁）。 */
   doors: {
     forward: DoorSpec;
-    aft: DoorSpec;
   };
   agv: {
     count: number;
@@ -72,16 +78,16 @@ export const defaultCargoConfig: CargoConfig = {
     wallHeight: 2.6,
     wallThickness: 0.18
   },
-  aisleHalfWidth: 1.15,
-  slotZ: 2.2,
+  nose: { length: 6.0 },
+  tail: { length: 2.6 },
+  slotZ: 2.3,
   slotPitch: 1.72,
   slotStartX: 6.8,
   slotCount: 6,
   initialAkePerSide: 2,
   doors: {
-    // 均位于右舷 -Z 侧壁。
-    forward: { x: 4.4, width: 2.6, height: 2.0 },
-    aft: { x: 19.2, width: 2.6, height: 2.0 }
+    // 仅前舱门，位于右舷 -Z 侧壁；门洞净高 2.5 m 保证「载货 AGV 直接穿门进舱」不超高。
+    forward: { x: 4.4, width: 2.6, height: 2.5 }
   },
   agv: {
     count: 2,
@@ -113,9 +119,8 @@ export const ULD_META: Record<CargoType, UldMeta> = {
   PAX: { label: 'PAX 标准托盘', short: 'PAX', color: '#ffab2e' }
 };
 
-export const DOOR_LABEL: Record<'forward' | 'aft', string> = {
-  forward: '前货舱门',
-  aft: '后货舱门'
+export const DOOR_LABEL: Record<'forward', string> = {
+  forward: '前货舱门'
 };
 
 /** 浅合并配置，保证缺省字段回落默认值。 */
@@ -124,10 +129,11 @@ export function mergeCargoConfig(base: CargoConfig, patch: Partial<CargoConfig> 
   const next: CargoConfig = { ...base, ...patch };
   // 嵌套对象按层合并。
   if (patch.hold) next.hold = { ...base.hold, ...patch.hold };
+  if (patch.nose) next.nose = { ...base.nose, ...patch.nose };
+  if (patch.tail) next.tail = { ...base.tail, ...patch.tail };
   if (patch.doors) {
     next.doors = {
-      forward: { ...base.doors.forward, ...patch.doors.forward },
-      aft: { ...base.doors.aft, ...patch.doors.aft }
+      forward: { ...base.doors.forward, ...patch.doors.forward }
     };
   }
   if (patch.agv) next.agv = { ...base.agv, ...patch.agv };
@@ -141,8 +147,11 @@ export function mergeCargoConfig(base: CargoConfig, patch: Partial<CargoConfig> 
   return next;
 }
 
-/** 由列号生成 rack 槽位 id：SLOT-L-01 / SLOT-R-01。 */
-export function slotIdOf(side: 'L' | 'R', column: number): string {
+/** 货位排：C 中央排（Z=0）/ L 左舷 / R 右舷。 */
+export type SlotSide = 'L' | 'R' | 'C';
+
+/** 由排与列号生成货位 id：SLOT-L-01 / SLOT-R-01 / SLOT-C-01。 */
+export function slotIdOf(side: SlotSide, column: number): string {
   return `SLOT-${side}-${String(column).padStart(2, '0')}`;
 }
 
