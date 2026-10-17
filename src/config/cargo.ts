@@ -38,10 +38,6 @@ export interface CargoConfig {
   nose: {
     length: number;
   };
-  /** 机尾锥段长度（自货舱后隔板沿 +X 延伸，纯外形）。 */
-  tail: {
-    length: number;
-  };
   /** 左舷/右舷两排货位的 |Z|（中央排固定 Z=0）。 */
   slotZ: number;
   /** 槽位轴向间距。 */
@@ -78,8 +74,7 @@ export const defaultCargoConfig: CargoConfig = {
     wallHeight: 2.6,
     wallThickness: 0.18
   },
-  nose: { length: 6.0 },
-  tail: { length: 2.6 },
+  nose: { length: 9.0 },
   slotZ: 2.3,
   slotPitch: 1.72,
   slotStartX: 6.8,
@@ -130,7 +125,6 @@ export function mergeCargoConfig(base: CargoConfig, patch: Partial<CargoConfig> 
   // 嵌套对象按层合并。
   if (patch.hold) next.hold = { ...base.hold, ...patch.hold };
   if (patch.nose) next.nose = { ...base.nose, ...patch.nose };
-  if (patch.tail) next.tail = { ...base.tail, ...patch.tail };
   if (patch.doors) {
     next.doors = {
       forward: { ...base.doors.forward, ...patch.doors.forward }

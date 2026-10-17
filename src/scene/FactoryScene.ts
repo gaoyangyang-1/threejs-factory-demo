@@ -188,7 +188,8 @@ export class FactoryScene {
     // 竖屏沿机身纵轴略偏右舷（能看到舱门与舱外待命区）。
     let dir: THREE.Vector3;
     if (aspect >= 1) {
-      dir = new THREE.Vector3(0.42, 0.92, -0.62).normalize();
+      // 略偏右舷的前上方大俯角：机身长轴在屏幕上接近竖向，避开左右两侧面板的遮挡。
+      dir = new THREE.Vector3(0.34, 1.15, -0.5).normalize();
     } else {
       const azimuth = (14 * Math.PI) / 180;
       const elevation = (38 * Math.PI) / 180;
@@ -223,7 +224,7 @@ export class FactoryScene {
     const halfW = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness;
     return {
       x0: -(cfg.nose.length + 0.8),
-      x1: cfg.hold.length + cfg.tail.length + 0.8,
+      x1: cfg.hold.length + 0.8,
       y0: 0,
       y1: Math.max(cfg.hold.wallHeight + 1.5, 4.0),
       z0: -halfW - 2.6,
@@ -251,15 +252,21 @@ export class FactoryScene {
     this.camera.updateProjectionMatrix();
   }
 
-  /** 二分求能把内容包围盒完整收进画面（留 10% 边距）的最小相机距离。 */
+  /**
+   * 二分求能把内容包围盒收进画面「安全区」的最小相机距离。
+   * 左右两栏面板 + 顶栏/日志栏会遮挡画布边缘，故横向阈值收紧到 0.62、纵向 0.86，
+   * 保证机头/机尾/舱门/待命区落在面板之间的可见区域。
+   */
   private fitCameraDistance(target: THREE.Vector3, dir: THREE.Vector3): number {
     const corners = this.contentCorners();
     const ndc = new THREE.Vector3();
+    const limitX = 0.46;
+    const limitY = 0.84;
     const fits = (distance: number): boolean => {
       this.placeCamera(target, dir, distance);
       return corners.every((corner) => {
         ndc.copy(corner).project(this.camera);
-        return Math.abs(ndc.x) <= 0.9 && Math.abs(ndc.y) <= 0.9;
+        return Math.abs(ndc.x) <= limitX && Math.abs(ndc.y) <= limitY;
       });
     };
 
@@ -466,7 +473,7 @@ export class FactoryScene {
 
     const cfg = this.config;
     // 整机（机头锥段 + 货舱 + 机尾锥段）中心，用作地面与取景基准。
-    const centerX = (cfg.hold.length - cfg.nose.length + cfg.tail.length) / 2;
+    const centerX = (cfg.hold.length - cfg.nose.length) / 2;
 
     // 相机与轨道目标随货舱长度、视口宽高比自适应（见 frameCamera）。
     this.frameCamera();
@@ -493,7 +500,6 @@ export class FactoryScene {
     this.scene.add(this.agvManager.group);
 
     this.buildNose();
-    this.buildTail();
     this.buildHull();
     this.buildDoors();
     this.buildFloorLayout();
@@ -595,69 +601,6 @@ export class FactoryScene {
     this.world.add(this.createTextSprite('机头 · NOSE', { x: -noseLen * 0.45, y: aY + 0.95, z: 0 }, 0.55, 0x1257c4));
   }
 
-  /** 机尾锥段（沿 +X 延伸）+ 垂尾，与机头形成明确的前后区分。 */
-  private buildTail(): void {
-    const cfg = this.config;
-    const tailLen = cfg.tail.length;
-    if (tailLen <= 0.2) return;
-    const len = cfg.hold.length;
-    const aZ = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness - 0.02;
-    const aY = cfg.hold.wallHeight + 0.14;
-    const centerY = cfg.hold.wallHeight * 0.5;
-
-    const rings = 10;
-    const segs = 28;
-    const positions: number[] = [];
-    const indices: number[] = [];
-    const profileScale = (t: number): number => 1 - 0.55 * t * t;
-    for (let i = 0; i <= rings; i += 1) {
-      const t = i / rings;
-      const x = len + t * tailLen;
-      const s = profileScale(t);
-      for (let j = 0; j <= segs; j += 1) {
-        const ang = (j / segs) * Math.PI * 2;
-        positions.push(x, centerY + Math.sin(ang) * aY * s, Math.cos(ang) * aZ * s);
-      }
-    }
-    const rowLen = segs + 1;
-    for (let i = 0; i < rings; i += 1) {
-      for (let j = 0; j < segs; j += 1) {
-        const a = i * rowLen + j;
-        const b = a + 1;
-        const c = a + rowLen;
-        const d = c + 1;
-        indices.push(a, b, c, b, d, c);
-      }
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setIndex(indices);
-    geometry.computeVertexNormals();
-    const shell = new THREE.Mesh(
-      geometry,
-      new THREE.MeshStandardMaterial({ color: 0xe7eef8, roughness: 0.55, metalness: 0.3, side: THREE.DoubleSide })
-    );
-    shell.castShadow = true;
-    this.world.add(shell);
-
-    // 垂尾（示意）：机尾上方的后掠鳍面，从尾锥顶部立起。
-    const finShape = new THREE.Shape();
-    finShape.moveTo(0, 0);
-    finShape.lineTo(tailLen * 0.82, 0);
-    finShape.lineTo(tailLen * 0.5, 1.15);
-    finShape.lineTo(tailLen * 0.18, 1.15);
-    finShape.closePath();
-    const fin = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(finShape, { depth: 0.16, bevelEnabled: false }),
-      new THREE.MeshStandardMaterial({ color: 0xdbe6f4, roughness: 0.5, metalness: 0.35 })
-    );
-    fin.position.set(len + 0.1, cfg.hold.wallHeight + 0.02, -0.08);
-    fin.castShadow = true;
-    this.world.add(fin);
-
-    this.world.add(this.createTextSprite('机尾 · TAIL', { x: len + tailLen * 0.5, y: aY + 0.95, z: 0 }, 0.55, 0xe07a1f));
-  }
-
   private buildHull(): void {
     const cfg = this.config;
     const len = cfg.hold.length;
@@ -709,6 +652,8 @@ export class FactoryScene {
     };
     endWall(wallT / 2);
     endWall(len - wallT / 2);
+    // 机尾一侧不做尾锥外形，仅保留平直后隔框 + 标牌，避免与机头外形混淆。
+    this.world.add(this.createTextSprite('机尾 · TAIL', { x: len - 0.9, y: wallH + 0.6, z: 0 }, 0.5, 0xe07a1f));
 
     // 顶部纵梁与机身圆弧示意骨架。
     const ribMat = new THREE.MeshStandardMaterial({

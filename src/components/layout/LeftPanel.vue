@@ -56,13 +56,6 @@
               <span class="unit">m</span>
             </span>
           </div>
-          <div class="c-field">
-            <label>机尾锥段长</label>
-            <span class="input-wrap">
-              <input v-model.number="tailProxy['length']" type="number" class="c-input" step="0.5" min="0" />
-              <span class="unit">m</span>
-            </span>
-          </div>
         </div>
       </section>
 
@@ -163,7 +156,6 @@ const form = reactive<CargoConfig>(cloneConfig(store.config));
 const uldProxy = form.uld as unknown as Record<string, Record<string, number>>;
 const doorProxy = form.doors as unknown as Record<'forward', Record<string, number>>;
 const noseProxy = form.nose as unknown as Record<string, number>;
-const tailProxy = form.tail as unknown as Record<string, number>;
 const holdProxy = form.hold as unknown as Record<string, number>;
 const agvProxy = form.agv as unknown as Record<string, number>;
 
@@ -172,7 +164,6 @@ function syncForm() {
   const c = store.config;
   form.hold = { ...c.hold };
   form.nose = { ...c.nose };
-  form.tail = { ...c.tail };
   form.slotZ = c.slotZ;
   form.slotPitch = c.slotPitch;
   form.slotStartX = c.slotStartX;
@@ -233,7 +224,6 @@ function patchFromForm(): Partial<CargoConfig> {
   return {
     hold: { ...form.hold },
     nose: { ...form.nose },
-    tail: { ...form.tail },
     slotZ: form.slotZ,
     slotPitch: form.slotPitch,
     slotStartX: form.slotStartX,
