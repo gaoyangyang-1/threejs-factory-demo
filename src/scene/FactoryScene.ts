@@ -509,9 +509,9 @@ export class FactoryScene {
     const cfg = this.config;
     const noseLen = cfg.nose.length;
     if (noseLen <= 0.2) return;
-    const aZ = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness - 0.02;
-    const aY = cfg.hold.wallHeight + 0.14;
-    const centerY = cfg.hold.wallHeight * 0.5;
+    const aZ = cfg.hold.floorWidth / 2 + cfg.hold.wallThickness - 0.16;
+    const aY = cfg.hold.wallHeight * 0.78;
+    const centerY = cfg.hold.wallHeight * 0.42;
 
     const rings = 18;
     const segs = 32;
