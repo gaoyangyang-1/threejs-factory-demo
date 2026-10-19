@@ -622,21 +622,23 @@ export class FactoryScene {
       metalness: 0.35,
       side: THREE.DoubleSide
     });
-    const wallCenterZ = outerZ - wallT / 2;
-    // 左舷(+Z)整墙。
-    this.world.add(this.wallSegment(wallMat, len, wallH, wallT, 0, len, cx, wallCenterZ));
+    // 侧壁 Z 向：左舷为 +Z，右舷（AGV 进舱、有舱门）为 -Z。
+    const portZ = cfg.hold.floorWidth / 2 + wallT / 2;
+    const starboardZ = -(cfg.hold.floorWidth / 2 + wallT / 2);
+    // 左舷(+Z)：整面封闭舱壁。
+    this.world.add(this.wallSegment(wallMat, len, wallH, wallT, 0, len, cx, portZ));
 
-    // 右舷(-Z)墙：仅保留一个前舱门开口，其余整段封闭。
+    // 右舷(-Z)：仅保留一个前舱门开口，其余整段封闭。
     const door = cfg.doors.forward;
     const holeMin = door.x - door.width / 2;
     const holeMax = door.x + door.width / 2;
-    if (holeMin > 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, 0, holeMin, cx, -wallCenterZ));
-    if (holeMax < len - 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, holeMax, len, cx, -wallCenterZ));
+    if (holeMin > 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, 0, holeMin, cx, starboardZ));
+    if (holeMax < len - 0.02) this.world.add(this.wallSegment(wallMat, len, wallH, wallT, holeMax, len, cx, starboardZ));
     // 门洞上方墙体（门洞净高达舱壁高度时不再需要）。
     const headerH = wallH - door.height;
     if (headerH > 0.02) {
       const header = new THREE.Mesh(new THREE.BoxGeometry(door.width + wallT, headerH, wallT), wallMat);
-      header.position.set(door.x, door.height + headerH / 2, -wallCenterZ);
+      header.position.set(door.x, door.height + headerH / 2, starboardZ);
       this.world.add(header);
     }
 

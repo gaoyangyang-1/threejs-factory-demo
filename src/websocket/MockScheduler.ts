@@ -341,19 +341,29 @@ export class MockScheduler {
     return { waypoints: this.toPoses(this.filletRoute(pts, TURN_RADIUS), 0), obstacle };
   }
 
-  /** 出舱路线：入舱路线原样反向，由车端倒车沿原路径退出。 */
+  /**
+   * 出舱路线（独立规划，不是入舱路径的简单反写）：
+   *  - 先沿目标排原路倒回机头空场（该排靠机头一侧的货位按"由机尾向机头填充"必为空）；
+   *  - 在机头空场里以 R=1.2 m 圆弧转向舱门方向，**转场线保持在 z≈-0.6**，离右舷壁 ≥2.4 m；
+   *  - 再对准门洞直线倒出舱外，回到待命位。
+   * 关键：转弯全部发生在无货位的机头空场，且与两侧舱壁、已放货柜都留出扫掠余量。
+   */
   private routeOutbound(cfg: CargoConfig, home: Pose3, targetX: number, targetZ: number): Pose3[] {
-    const entry = entryPose(cfg);
     const laneX = frontLaneX(cfg);
+    const doorX = cfg.doors.forward.x;
     const stopX = targetX - PLACE_PUSH;
+    // 转场线：取机头空场中线附近（z=+0.4）。这样"转向舱门"的圆弧最外扩点离右舷壁仍有约 1 m，
+    // 且整段转场都发生在无货位的机头空场（x < 货位区起点），不会压到已放货物。
+    const sweepZ = 0.4;
     const pts: Array<{ x: number; z: number }> = [
       { x: stopX, z: targetZ },
       { x: laneX, z: targetZ },
-      { x: entry.x, z: entry.z },
+      { x: laneX, z: sweepZ },
+      { x: doorX, z: sweepZ },
+      { x: doorX, z: home.z },
       { x: home.x, z: home.z }
     ];
-    // 倒车退出沿用原折线（不再圆角化）：倒车时车尾沿路径走，额外加圆角反而让车尾追不上点位。
-    return this.toPoses(pts, home.yaw);
+    return this.toPoses(this.filletRoute(pts, TURN_RADIUS), home.yaw);
   }
 
   private toPoses(pts: Array<{ x: number; z: number }>, finalYaw: number): Pose3[] {

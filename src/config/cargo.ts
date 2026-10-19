@@ -75,8 +75,9 @@ export const defaultCargoConfig: CargoConfig = {
     wallThickness: 0.18
   },
   nose: { length: 9.0 },
-  /** 左右两排货位中心 |Z|=2.1：留出载货 AGV 转弯扫掠余量，避免扫到舱壁。 */
-  slotZ: 2.1,
+  /** 左右两排货位中心 |Z|=1.95：载货 AGV 在排内转向的扫掠半径约 1.16 m，
+   *  1.95+1.16=3.11 m，距舱壁内沿 3.4 m 仍有约 0.29 m 余量（>250 mm 警戒线）。 */
+  slotZ: 1.95,
   slotPitch: 1.72,
   slotStartX: 6.8,
   slotCount: 6,
