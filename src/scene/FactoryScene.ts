@@ -26,17 +26,6 @@ interface FactorySceneOptions {
   container: HTMLElement;
 }
 
-interface DoorVisual {
-  doorId: DoorId;
-  leaf: THREE.Mesh;
-  /** 关门时叶片的 X（门洞中心）。 */
-  baseX: number;
-  /** 开门叶片沿机身的滑移方向（前门向后滑、后门向前滑，均在外侧）。 */
-  slideDir: number;
-  open: number;
-  target: number;
-}
-
 interface CargoTween {
   mesh: THREE.Group;
   fromX: number;
@@ -87,7 +76,6 @@ export class FactoryScene {
   private ground?: THREE.Mesh;
   private readonly world = new THREE.Group();
   private readonly pathLayer = new THREE.Group();
-  private readonly doorVisuals: DoorVisual[] = [];
   private readonly cargoTweens = new Map<string, CargoTween>();
   private readonly obstacleMarkers: ObstacleMarker[] = [];
   private readonly pickupTargets = new Map<string, string>();
@@ -358,10 +346,9 @@ export class FactoryScene {
     return { x: this.tmpVec.x, y: this.tmpVec.y, z: this.tmpVec.z, yaw: this.worldEuler.y };
   }
 
-  /** 舱门开启进度（0 关 → 1 全开），供编排源判断可通行时机。 */
-  doorProgress(doorId: DoorId): number | null {
-    const door = this.doorVisuals.find((item) => item.doorId === doorId);
-    return door ? door.open : null;
+  /** 舱门开启进度：门常开（无门扇），恒为 1。 */
+  doorProgress(_doorId: DoorId): number | null {
+    return 1;
   }
 
   private readonly tmpVec = new THREE.Vector3();
@@ -413,11 +400,9 @@ export class FactoryScene {
         if (pulse) pulse.active = p.state === 'pending';
         break;
       }
-      case 'door:set': {
-        const door = this.doorVisuals.find((item) => item.doorId === command.payload.doorId);
-        if (door) door.target = command.payload.state === 'open' ? 1 : 0;
+      case 'door:set':
+        // 舱门常开且无门扇，开门/关门指令忽略（保留契约兼容）。
         break;
-      }
     }
   }
 
@@ -468,7 +453,6 @@ export class FactoryScene {
     this.obstacleMarkers.length = 0;
     this.pickupTargets.clear();
     this.placeTargets.clear();
-    this.doorVisuals.length = 0;
     this.slotPulses.clear();
 
     const cfg = this.config;
@@ -694,23 +678,14 @@ export class FactoryScene {
   private buildDoors(): void {
     const cfg = this.config;
     const outerZ = starboardOuterZ(cfg);
-    const leafZ = outerZ + 0.045;
     const frameMat = new THREE.MeshStandardMaterial({ color: 0x7f9cc4, roughness: 0.55, metalness: 0.55 });
-    const panelMat = new THREE.MeshStandardMaterial({
-      color: 0xb9cde8,
-      roughness: 0.35,
-      metalness: 0.6,
-      transparent: true,
-      opacity: 0.94,
-      side: THREE.DoubleSide
-    });
     const t = cfg.hold.wallThickness + 0.22;
 
     const spec = cfg.doors.forward;
     const x = spec.x;
     const w = spec.width;
     const h = spec.height;
-    // 门框（围绕洞口的四根边框）。
+    // 门框（围绕洞口的四根边框）；不做门扇——舱门常开，只有 AGV 旁边的这一处开口。
     const bar = (bw: number, bh: number, bx: number, by: number) => {
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, t), frameMat);
       mesh.position.set(bx, by, outerZ - cfg.hold.wallThickness / 2);
@@ -721,19 +696,14 @@ export class FactoryScene {
     bar(0.14, h + 0.3, x - w / 2 - 0.07, h / 2);
     bar(0.14, h + 0.3, x + w / 2 + 0.07, h / 2);
 
-    // 门扇：位于墙外，开门沿机身轴向（向机尾方向）滑移避开门洞。
-    const leaf = new THREE.Mesh(new THREE.BoxGeometry(w - 0.1, h - 0.1, 0.1), panelMat);
-    leaf.position.set(x, h / 2, leafZ);
-    this.world.add(leaf);
-    this.doorVisuals.push({ doorId: 'forward', leaf, baseX: x, slideDir: 1, open: 0, target: 0 });
-
-    // 舱外装卸平台（AGV 待命区；顶面与地板同高）。
+    // 舱外装卸平台（AGV 待命区；顶面与地板同高），沿 Z 方向加深以容纳多台排队待命。
     const dockWidth = Math.max(w + 2.4, 4.6);
+    const dockDepth = 2.6 + Math.max(0, cfg.agv.count - 1) * 2.4;
     const dock = new THREE.Mesh(
-      new THREE.BoxGeometry(dockWidth, 0.08, 2.6),
+      new THREE.BoxGeometry(dockWidth, 0.08, dockDepth),
       new THREE.MeshStandardMaterial({ color: 0xcfdcea, roughness: 0.75, metalness: 0.12 })
     );
-    dock.position.set(x, -0.04, outerZ - 1.3);
+    dock.position.set(x, -0.04, outerZ - 0.3 - dockDepth / 2);
     dock.receiveShadow = true;
     this.world.add(dock);
     const dockMark = new THREE.MeshBasicMaterial({ color: C_AMBER, transparent: true, opacity: 0.3 });
@@ -741,14 +711,16 @@ export class FactoryScene {
     line.rotation.x = -Math.PI / 2;
     line.position.set(x, 0.012, outerZ - 0.55);
     this.world.add(line);
-    // 待命区地面标线（AGV 停在此处等待任务）。
-    const standLine = new THREE.Mesh(new THREE.PlaneGeometry(dockWidth - 1.0, 0.04), dockMark);
-    standLine.rotation.x = -Math.PI / 2;
-    standLine.position.set(x, 0.012, outerZ - 2.35);
-    this.world.add(standLine);
+    // 待命位标线（每台 AGV 一条）。
+    for (let i = 0; i < Math.max(1, Math.round(cfg.agv.count)); i += 1) {
+      const standLine = new THREE.Mesh(new THREE.PlaneGeometry(dockWidth - 1.0, 0.04), dockMark);
+      standLine.rotation.x = -Math.PI / 2;
+      standLine.position.set(x, 0.012, outerZ - 1.2 - i * 2.4);
+      this.world.add(standLine);
+    }
 
-    // 门位标牌。
-    this.world.add(this.createTextSprite('前货舱门 · FORWARD', { x, y: h + 0.42, z: outerZ - 0.6 }, 0.5, 0x1257c4));
+    // 门位标牌（常开）。
+    this.world.add(this.createTextSprite('前舱门 · 常开', { x, y: h + 0.42, z: outerZ - 0.6 }, 0.5, 0x1257c4));
   }
 
   private buildFloorLayout(): void {
@@ -910,21 +882,11 @@ export class FactoryScene {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.controls.update();
     this.agvManager?.update(delta);
-    this.animateDoors(delta);
     this.animateCargoTweens(delta);
     this.animateObstacles();
     this.animateSlotPulses();
     this.composer.render();
   };
-
-  private animateDoors(delta: number): void {
-    for (const door of this.doorVisuals) {
-      if (Math.abs(door.target - door.open) < 0.001) continue;
-      door.open = THREE.MathUtils.damp(door.open, door.target, 1.4, delta);
-      door.leaf.position.x = door.baseX + door.open * door.slideDir * 3.1;
-      door.leaf.visible = door.open < 0.99;
-    }
-  }
 
   private animateCargoTweens(delta: number): void {
     for (const [id, tween] of this.cargoTweens) {

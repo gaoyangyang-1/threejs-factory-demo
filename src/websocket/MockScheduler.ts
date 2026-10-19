@@ -24,7 +24,6 @@ import type {
   AlgorithmSourceMode,
   ControlCommand,
   CargoType,
-  DoorId,
   Pose3,
   SceneProbe,
   TransportTask
@@ -32,7 +31,6 @@ import type {
 import {
   PLACE_PUSH,
   agvRoles,
-  dockPose,
   entryPose,
   frontLaneX,
   parseSlotId,
@@ -46,10 +44,8 @@ export interface MockSchedulerOptions {
 }
 
 const ARRIVE_DIST = 0.16;
-const ARRIVE_YAW = 0.18;
-const MAX_LEG_WAIT_MS = 40000;
+const MAX_LEG_WAIT_MS = 240000;
 const POLL_MS = 80;
-const DOOR: DoorId = 'forward';
 
 function poseDist(a: Pose3, b: Pose3): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
@@ -164,8 +160,8 @@ export class MockScheduler {
         this.pump();
         break;
       case 'door:override':
-        this.emit({ type: 'door:set', payload: { doorId: command.doorId, state: command.state } });
-        this.emitLog('info', `前货舱门手动${command.state === 'open' ? '开启' : '关闭'}`);
+        // 舱门常开、无门扇：手动开关指令不再下发（保留契约兼容）。
+        this.emitLog('info', '舱门常开，无需手动开关');
         break;
       case 'config:change':
         break;
@@ -207,10 +203,7 @@ export class MockScheduler {
       this.emitTask(task.id, 'failed', 0, '无可用的适配货位');
       return;
     }
-
-    // 开门：整任务期间保持开启，任务结束后关闭。
-    this.emit({ type: 'door:set', payload: { doorId: DOOR, state: 'open' } });
-    await this.waitDoorOpen(this.probe(), DOOR, token);
+    // 舱门常开、无门扇，不再下发开门/关门指令。
 
     const total = jobs.length;
     let done = 0;
@@ -224,7 +217,6 @@ export class MockScheduler {
 
     this.emitTask(task.id, 'done', 1, '任务完成');
     this.emitLog('info', `任务 ${task.id} 完成：${total} 件货物已排列放置`);
-    this.emit({ type: 'door:set', payload: { doorId: DOOR, state: 'close' } });
     this.emit({ type: 'path:plan', payload: { agvId: jobs[0].agvId, waypoints: [] } });
   }
 
@@ -282,7 +274,7 @@ export class MockScheduler {
       this.emitAgv(agvId, { phase: 'transport', taskId, cargoId, cargoType });
 
       // 2) 载货穿前舱门进舱 → 机头空场转场 → 目标列前方。
-      const inbound = this.routeInbound(cfg, agvId, home, target.x, target.z, target.column);
+      const inbound = this.routeInbound(cfg, agvId, home, target.x, target.z);
       this.emit({ type: 'path:plan', payload: { agvId, waypoints: inbound.waypoints } });
       if (inbound.obstacle) {
         this.emit({ type: 'obstacle:event', payload: inbound.obstacle });
@@ -299,10 +291,11 @@ export class MockScheduler {
       this.emit({ type: 'cargo:state', payload: { cargoId, status: 'placed', slotId, cargoType } });
       this.emitLog('info', `${cargoName} 已推入货位 ${slotId}`);
 
-      // 4) 退回舱外待命位。
+      // 4) 原路倒车退回舱外待命位（不倒头、不原地掉头）。
       const outbound = this.routeOutbound(cfg, home, target.x, target.z);
       this.emitAgv(agvId, { phase: 'done', taskId, cargoId: null, cargoType: null });
-      await this.driveRoute(agvId, outbound, token);
+      this.emitLog('info', `${agvId} 原路倒车退出货舱，返回舱外待命位`);
+      await this.driveRoute(agvId, outbound, token, true);
       this.emit({ type: 'slot:mark', payload: { slotId, state: 'clear' } });
     } catch (error) {
       if (token.cancelled) return;
@@ -318,54 +311,42 @@ export class MockScheduler {
   // ---------------------------------------------------------------------------
 
   /**
-   * 入舱路线：舱外待命位 → 门洞正前方对位 → 穿门进舱 → 机头空场横向转场 → 目标列前方停位。
-   * 目标排若在中央/左舷（需要跨过 Z=0 转场），则在该空场插入一次绕障演示。
+   * 入舱路线：舱外待命位 → 穿门进舱（正对门洞直线）→ 机头空场转场到目标排 → 目标列前方停位。
+   * 转弯交给车端"边走边转 + 最小转弯半径"完成，因此这里只给关键点，不下发掉头动作。
    */
   private routeInbound(
     cfg: CargoConfig,
     agvId: string,
     home: Pose3,
     targetX: number,
-    targetZ: number,
-    column: number
+    targetZ: number
   ): { waypoints: Pose3[]; obstacle: { agvId: string; pose: Pose3; radius: number } | null } {
-    const dock = dockPose(cfg);
     const entry = entryPose(cfg);
     const laneX = frontLaneX(cfg);
     const stopX = targetX - PLACE_PUSH;
-    const crossesCenter = targetZ > -0.1 && column >= 1;
     const pts: Array<{ x: number; z: number }> = [
       { x: home.x, z: home.z },
-      { x: dock.x, z: dock.z },
       { x: entry.x, z: entry.z },
-      { x: laneX, z: entry.z }
+      { x: laneX, z: targetZ },
+      { x: stopX, z: targetZ }
     ];
-    if (crossesCenter) {
-      // 绕障：在机头空场内先向机头方向让开一段，再横向转到目标排。
-      pts.push({ x: laneX - 0.8, z: entry.z });
-      pts.push({ x: laneX - 0.8, z: targetZ });
-      pts.push({ x: laneX, z: targetZ });
-    } else {
-      pts.push({ x: laneX, z: targetZ });
-    }
-    pts.push({ x: stopX, z: targetZ });
-    return {
-      waypoints: this.toPoses(pts, 0),
-      obstacle: crossesCenter ? { agvId, pose: { x: laneX, y: 0, z: 0, yaw: 0 }, radius: 0.45 } : null
-    };
+    // 侧向障碍演示：只在左舷/中央排的转场侧向放置，保持在航道之外（不阻断路径）。
+    const obstacle =
+      targetZ > -0.1
+        ? { agvId, pose: { x: laneX + 0.6, y: 0, z: targetZ + 1.25, yaw: 0 }, radius: 0.45 }
+        : null;
+    return { waypoints: this.toPoses(pts, 0), obstacle };
   }
 
-  /** 出舱路线：目标列前方 → 机头空场 → 穿门 → 舱外待命位。 */
+  /** 出舱路线：入舱路线原样反向，由车端倒车沿原路径退出。 */
   private routeOutbound(cfg: CargoConfig, home: Pose3, targetX: number, targetZ: number): Pose3[] {
-    const dock = dockPose(cfg);
     const entry = entryPose(cfg);
     const laneX = frontLaneX(cfg);
+    const stopX = targetX - PLACE_PUSH;
     const pts: Array<{ x: number; z: number }> = [
-      { x: targetX - PLACE_PUSH, z: targetZ },
+      { x: stopX, z: targetZ },
       { x: laneX, z: targetZ },
-      { x: laneX, z: entry.z },
       { x: entry.x, z: entry.z },
-      { x: dock.x, z: dock.z },
       { x: home.x, z: home.z }
     ];
     return this.toPoses(pts, home.yaw);
@@ -396,10 +377,10 @@ export class MockScheduler {
     this.emit({ type: 'log', payload: { level, message } });
   }
 
-  private async driveRoute(agvId: string, waypoints: Pose3[], token: RunToken): Promise<void> {
+  private async driveRoute(agvId: string, waypoints: Pose3[], token: RunToken, reverse = false): Promise<void> {
     for (const wp of waypoints) {
       if (token.cancelled) return;
-      this.sendCommand({ agvId, type: 'moveTo', pose: wp });
+      this.sendCommand({ agvId, type: 'moveTo', pose: wp, reverse });
       await this.waitAgvAt(agvId, wp, token);
     }
   }
@@ -411,21 +392,9 @@ export class MockScheduler {
       if (token.cancelled) return;
       await this.pauseGate(token);
       const pose = probe?.agvPose(agvId);
-      if (pose && poseDist(pose, target) < ARRIVE_DIST && Math.abs(yawDeltaOf(pose.yaw, target.yaw)) < ARRIVE_YAW) return;
+      // 只判位置：车头朝向由"边走边转"的转弯半径约束决定，不额外要求对准。
+      if (pose && poseDist(pose, target) < ARRIVE_DIST + 0.1) return;
       if (Date.now() - start > MAX_LEG_WAIT_MS) throw new Error(`${agvId} 长时间未到达目标位`);
-      await this.sleep(POLL_MS, token);
-    }
-  }
-
-  private async waitDoorOpen(probe: SceneProbe | null, doorId: DoorId, token: RunToken): Promise<void> {
-    if (!probe?.doorProgress) return;
-    const start = Date.now();
-    for (;;) {
-      if (token.cancelled) return;
-      await this.pauseGate(token);
-      const progress = probe.doorProgress(doorId);
-      if (progress === null || progress >= 0.9) return;
-      if (Date.now() - start > 12000) throw new Error('舱门开启超时');
       await this.sleep(POLL_MS, token);
     }
   }

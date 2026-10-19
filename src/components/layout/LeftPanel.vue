@@ -65,10 +65,8 @@
         <div class="door-grid">
           <div v-for="door in (['forward'] as const)" :key="door" class="door-box">
             <div class="door-head">
-              <strong>前货舱门</strong>
-              <span class="c-chip" :class="store.doors[door] === 'open' ? 'green' : 'gray'">
-                {{ store.doors[door] === 'open' ? '已开启' : '已关闭' }}
-              </span>
+              <strong>前舱门（AGV 旁 · 常开）</strong>
+              <span class="c-chip green">常开</span>
             </div>
             <div v-for="field in doorFields" :key="field.key" class="c-field">
               <label>{{ field.label }}</label>
@@ -77,10 +75,7 @@
                 <span class="unit">m</span>
               </span>
             </div>
-            <div class="door-actions">
-              <button class="c-btn sm" :disabled="store.mode !== 'mock'" @click="store.setDoor(door, 'open')">开门</button>
-              <button class="c-btn sm" :disabled="store.mode !== 'mock'" @click="store.setDoor(door, 'close')">关门</button>
-            </div>
+            <div class="hint">舱门常开、无门扇：整个系统只保留 AGV 旁边的这一处舱门，其余门已取消。</div>
             <div class="hint dim">门洞净高需 ≥ 载货总高（约 2.3 m），否则载货 AGV 无法穿门进舱。</div>
           </div>
         </div>

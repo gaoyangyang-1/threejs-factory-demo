@@ -33,6 +33,8 @@ interface AGVRuntime extends AGVRuntimeOptions {
   wheels: WheelVisual[];
   queue: AGVCommand[];
   state: 'idle' | 'moving' | 'aligning' | 'pick' | 'place' | 'error';
+  /** 当前 moveTo 是否倒车（车尾朝目标）。 */
+  reverse: boolean;
   carrying: boolean;
   task: string;
   speed: number;
@@ -46,8 +48,12 @@ interface AGVRuntime extends AGVRuntimeOptions {
   steerAngle: number;
 }
 
-const ARRIVE_DIST = 0.04;
+const ARRIVE_DIST = 0.12;
 const ARRIVE_YAW = 0.06;
+/** 最小转弯半径（m）：AGV 只能边走边转，不允许原地掉头。 */
+const TURN_RADIUS = 1.2;
+/** 航向跟踪增益（越大越"贴"目标航向，但受转弯半径限幅）。 */
+const HEADING_GAIN = 2.4;
 
 export class AGVTransportManager {
   readonly group = new THREE.Group();
@@ -171,6 +177,7 @@ export class AGVTransportManager {
       wheels: [],
       queue: [],
       state: 'idle',
+      reverse: false,
       carrying: false,
       task: '待命',
       speed: options.defaultSpeed,
@@ -272,6 +279,7 @@ export class AGVTransportManager {
       case 'moveTo': {
         const pose = current.pose!;
         const speed = current.speed ?? runtime.defaultSpeed;
+        runtime.reverse = current.reverse === true;
         this.driveToward(runtime, pose, speed, delta);
         if (this.arrived(runtime, pose)) {
           runtime.queue.shift();
@@ -340,30 +348,29 @@ export class AGVTransportManager {
     const dx = pose.x - runtime.group.position.x;
     const dz = pose.z - runtime.group.position.z;
     const distance = Math.sqrt(dx * dx + dz * dz);
-    // 行驶方向航向（车身前进方向定义为局部 +X 轴）。
-    const heading = distance < 1e-6 ? pose.yaw : Math.atan2(-dz, dx);
-    const err = yawDelta(runtime.group.rotation.y, heading);
-
-    if (Math.abs(err) > 0.35) {
-      // 原地转向：差速小车先对准行进方向再行驶，转向过程真实可见。
+    if (distance < 1e-6) {
       runtime.speed = 0;
-      this.turnToward(runtime, heading, delta * 2.6);
       return;
     }
-    // 直线行驶。
-    runtime.speed = speed;
-    const step = Math.min(distance, speed * delta);
-    if (step > 0 && distance > 1e-6) {
-      runtime.group.position.x += (dx / distance) * step;
-      runtime.group.position.z += (dz / distance) * step;
-    }
-    // 接近目标时开始对准最终姿态，到位判定由 arrived 决定。
-    const closeEnough = distance < 0.6;
-    if (closeEnough) {
-      this.turnToward(runtime, pose.yaw, delta * 3);
-    } else {
-      this.turnToward(runtime, heading, delta * 8);
-    }
+    // 行驶方向航向（车身前进方向定义为局部 +X 轴）。
+    const bearing = Math.atan2(-dz, dx);
+    // 倒车时让车尾朝向目标：车头航向 = 目标方位 + π，全程不原地掉头。
+    const targetYaw = runtime.reverse ? bearing + Math.PI : bearing;
+    const err = yawDelta(runtime.group.rotation.y, targetYaw);
+
+    // 关键：转弯半径约束 —— 角速度上限 = 速度 / 最小转弯半径。
+    // 因此车辆只能"边走边转"，转出的轨迹弧半径不小于 TURN_RADIUS。
+    const speedAbs = Math.abs(speed);
+    const omegaMax = speedAbs / TURN_RADIUS;
+    const omega = THREE.MathUtils.clamp(err * HEADING_GAIN, -omegaMax, omegaMax);
+    runtime.group.rotation.y += omega * delta;
+
+    // 沿当前车头方向前进 / 后退。
+    const signedSpeed = runtime.reverse ? -speedAbs : speedAbs;
+    runtime.speed = signedSpeed;
+    const step = Math.min(distance, speedAbs * delta);
+    runtime.group.position.x += Math.cos(runtime.group.rotation.y) * step * (runtime.reverse ? -1 : 1);
+    runtime.group.position.z += -Math.sin(runtime.group.rotation.y) * step * (runtime.reverse ? -1 : 1);
   }
 
   private turnToward(runtime: AGVRuntime, yaw: number, amount: number): void {
@@ -375,9 +382,8 @@ export class AGVTransportManager {
   private arrived(runtime: AGVRuntime, pose: Pose3): boolean {
     const dx = pose.x - runtime.group.position.x;
     const dz = pose.z - runtime.group.position.z;
-    const posOk = Math.sqrt(dx * dx + dz * dz) < ARRIVE_DIST;
-    const yawOk = Math.abs(yawDelta(runtime.group.rotation.y, pose.yaw)) < ARRIVE_YAW;
-    return posOk && yawOk;
+    // 只判位置：朝向由路径决定，不再为对齐朝向而原地打转。
+    return Math.sqrt(dx * dx + dz * dz) < ARRIVE_DIST;
   }
 
   private paintIndicator(runtime: AGVRuntime): void {

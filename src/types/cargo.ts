@@ -29,6 +29,8 @@ export interface AGVCommand {
   type: AGVCommandType;
   pose?: Pose3;
   speed?: number;
+  /** 倒车行驶（车尾朝目标，保持车头朝向不原地掉头），用于原路退出货舱。 */
+  reverse?: boolean;
   /** 指令时间戳（单调递增，用于去重/排序）。 */
   ts: number;
 }

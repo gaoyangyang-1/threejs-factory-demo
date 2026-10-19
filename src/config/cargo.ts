@@ -90,7 +90,8 @@ export const defaultCargoConfig: CargoConfig = {
     width: 1.1,
     height: 0.52,
     liftHeight: 0.35,
-    speed: 1.6
+    /** 巡航速度：1 m / 5 s = 0.2 m/s（面板可改）。 */
+    speed: 0.2
   },
   uld: {
     AKE: { length: 1.562, width: 1.534, height: 1.626 },
