@@ -18,7 +18,16 @@ export interface AGVRuntimeOptions {
   defaultSpeed: number;
   home: Pose3;
   /** 舱内可行驶边界（米，机体系）：超出即夹停，杜绝穿墙。 */
-  bounds?: { minX: number; maxX: number; minZ: number; holdZ: number };
+  bounds?: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    holdZ: number;
+    /** 舱外待命走廊（门洞宽度内），z < -holdZ 时只允许在走廊内活动。 */
+    corridorMinX: number;
+    corridorMaxX: number;
+    corridorMinZ: number;
+  };
   /** 执行 pick/place 动作时的回调。 */
   onAction?: (agvId: string, type: 'pick' | 'place') => void;
 }
@@ -39,9 +48,9 @@ interface AGVRuntime extends AGVRuntimeOptions {
   reverse: boolean;
   /** 是否由指令显式指定倒车（显式时按指令给定航向走，不按"方位角"追点）。 */
   reverseExplicit: boolean;
-  /** 卡死判定：上一帧位置与静止累计时长。 */
-  lastX: number;
-  lastZ: number;
+  /** 卡死判定：参照点与窗口累计时长（按位移判定，与帧率无关）。 */
+  stuckRefX: number;
+  stuckRefZ: number;
   stuck: number;
   carrying: boolean;
   task: string;
@@ -57,13 +66,17 @@ interface AGVRuntime extends AGVRuntimeOptions {
 }
 
 const ARRIVE_DIST = 0.2;
+const ARRIVE_DIST_REVERSE = 0.55;
 const ARRIVE_YAW = 0.06;
+/** 倒车速度系数：倒车比前进更难精确跟踪，降速保证能停在航点附近。 */
+const REVERSE_SPEED_SCALE = 0.6;
 /** 最小转弯半径（m）：AGV 只能边走边转，不允许原地掉头。 */
 const TURN_RADIUS = 1.2;
 /** 航向跟踪增益（越大越"贴"目标航向，但受转弯半径限幅）。 */
 const HEADING_GAIN = 2.4;
-/** 追点卡死判定：最近距离不再缩小超过该时长（s）则跳过该航点，避免绕圈死锁。 */
-const STUCK_TIMEOUT = 1.6;
+/** 追点卡死判定：以"时间窗口内的位移"为准（与帧率无关），窗口内位移不足才算卡死。 */
+const STUCK_WINDOW = 2.5;
+const STUCK_MIN_MOVE = 0.06;
 
 export class AGVTransportManager {
   readonly group = new THREE.Group();
@@ -87,7 +100,18 @@ export class AGVTransportManager {
     const runtime = this.runtimes.get(command.agvId);
     if (!runtime) return;
     if (runtime.state === 'error') return;
-    // 说明：指令带 ts 单调递增；若收到的 ts 不大于最后已执行指令则忽略（算法重发防护）。
+    // stop 在"接收时"立即生效并清空队列；
+    // 不能排进队列再处理，否则同一批下发的后续 moveTo 会被一起清掉（车一步不动）。
+    if (command.type === 'stop') {
+      runtime.queue.length = 0;
+      runtime.speed = 0;
+      runtime.reverse = false;
+      runtime.reverseExplicit = false;
+      runtime.stuck = 0;
+      runtime.stuckRefX = runtime.group.position.x;
+      runtime.stuckRefZ = runtime.group.position.z;
+      return;
+    }
     runtime.queue.push(command);
   }
 
@@ -217,8 +241,8 @@ export class AGVTransportManager {
       state: 'idle',
       reverse: false,
       reverseExplicit: false,
-      lastX: options.home.x,
-      lastZ: options.home.z,
+      stuckRefX: options.home.x,
+      stuckRefZ: options.home.z,
       stuck: 0,
       carrying: false,
       task: '待命',
@@ -320,20 +344,30 @@ export class AGVTransportManager {
     switch (current.type) {
       case 'moveTo': {
         const pose = current.pose!;
-        const speed = current.speed ?? runtime.defaultSpeed;
+        const baseSpeed = current.speed ?? runtime.defaultSpeed;
         // 能退就不掉头：指令未指定时，比较"前进对准"与"倒车对准"的角度，取更小者。
         runtime.reverseExplicit = current.reverse === true;
         runtime.reverse = runtime.reverseExplicit ? true : this.preferReverse(runtime, pose);
+        const speed = runtime.reverse ? baseSpeed * REVERSE_SPEED_SCALE : baseSpeed;
         this.driveToward(runtime, pose, speed, delta);
-        // 卡死保护：只在"真的没动"时计数（倒车转向时距离会暂时变大，不能用距离判据）。
-        const moved = Math.hypot(runtime.group.position.x - runtime.lastX, runtime.group.position.z - runtime.lastZ);
-        runtime.lastX = runtime.group.position.x;
-        runtime.lastZ = runtime.group.position.z;
-        if (moved < 0.012) runtime.stuck += delta;
-        else runtime.stuck = 0;
-        if (this.arrived(runtime, pose) || runtime.stuck > STUCK_TIMEOUT) {
+        // 卡死保护：按"窗口内累计位移"判断（与帧率无关）。
+        // 注意：绝不能用"每帧位移"阈值——高刷屏每帧只有几毫米，会被误判为卡死。
+        const movedFromRef = Math.hypot(
+          runtime.group.position.x - runtime.stuckRefX,
+          runtime.group.position.z - runtime.stuckRefZ
+        );
+        if (movedFromRef > STUCK_MIN_MOVE) {
+          runtime.stuckRefX = runtime.group.position.x;
+          runtime.stuckRefZ = runtime.group.position.z;
+          runtime.stuck = 0;
+        } else {
+          runtime.stuck += delta;
+        }
+        if (this.arrived(runtime, pose) || runtime.stuck > STUCK_WINDOW) {
           runtime.queue.shift();
           runtime.stuck = 0;
+          runtime.stuckRefX = runtime.group.position.x;
+          runtime.stuckRefZ = runtime.group.position.z;
         }
         break;
       }
@@ -432,16 +466,24 @@ export class AGVTransportManager {
     let nx = runtime.group.position.x + Math.cos(runtime.group.rotation.y) * step;
     let nz = runtime.group.position.z - Math.sin(runtime.group.rotation.y) * step;
 
-    // 硬边界：舱内行驶时夹停在可行驶区域内（宁可停住，也不穿墙）。
+    // 硬边界：舱内 + 舱外待命走廊，越界一律夹停（宁可停住，也不穿墙、不飞出场景）。
     const b = runtime.bounds;
-    if (b && nz > -b.holdZ + 0.05) {
-      const clampedX = THREE.MathUtils.clamp(nx, b.minX, b.maxX);
-      const clampedZ = THREE.MathUtils.clamp(nz, -b.holdZ + 0.05, b.holdZ - 0.05);
-      if (Math.abs(clampedX - nx) > 1e-6 || Math.abs(clampedZ - nz) > 1e-6) {
+    if (b) {
+      let cx = nx;
+      let cz = nz;
+      if (nz > -b.holdZ + 0.05) {
+        cx = THREE.MathUtils.clamp(nx, b.minX, b.maxX);
+        cz = THREE.MathUtils.clamp(nz, -b.holdZ + 0.05, b.holdZ - 0.05);
+      } else {
+        cx = THREE.MathUtils.clamp(nx, b.corridorMinX, b.corridorMaxX);
+        // 与舱内区域留 0.15 m 重叠，避免"两个区域边界不重叠"把车卡在门洞夹缝里。
+        cz = THREE.MathUtils.clamp(nz, b.corridorMinZ, -b.holdZ + 0.2);
+      }
+      if (Math.abs(cx - nx) > 1e-6 || Math.abs(cz - nz) > 1e-6) {
         runtime.speed = 0;
-        nx = clampedX;
-        nz = clampedZ;
         runtime.stuck += delta;
+        nx = cx;
+        nz = cz;
       }
     }
     runtime.group.position.x = nx;
@@ -457,8 +499,9 @@ export class AGVTransportManager {
   private arrived(runtime: AGVRuntime, pose: Pose3): boolean {
     const dx = pose.x - runtime.group.position.x;
     const dz = pose.z - runtime.group.position.z;
-    // 只判位置：朝向由路径决定，不再为对齐朝向而原地打转。
-    return Math.sqrt(dx * dx + dz * dz) < ARRIVE_DIST;
+    // 只判位置：朝向由路径决定，不再为对齐朝向而原地打转。倒车用更宽的到位半径。
+    const tol = runtime.reverse ? ARRIVE_DIST_REVERSE : ARRIVE_DIST;
+    return Math.sqrt(dx * dx + dz * dz) < tol;
   }
 
   private paintIndicator(runtime: AGVRuntime): void {

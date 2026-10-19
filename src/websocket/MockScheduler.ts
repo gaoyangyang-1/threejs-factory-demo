@@ -283,7 +283,11 @@ export class MockScheduler {
         this.emit({ type: 'obstacle:event', payload: inbound.obstacle });
         this.emitLog('warn', `${agvId} 舱内转场遇障，绕行重规划`);
       }
-      await this.driveRoute(agvId, inbound.waypoints, token);
+      const reachedStop = await this.driveRoute(agvId, inbound.waypoints, token);
+      if (!reachedStop) {
+        // 车没到位就不允许"隔空放货"——宁可报错中止，也不让货物穿墙飞到货位。
+        throw new Error(`${agvId} 未到达目标列前方停位，已中止入位（避免货物穿越舱壁/货柜）`);
+      }
 
       // 3) 到位推入货位。
       this.emitAgv(agvId, { phase: 'placing', taskId, cargoId, cargoType });
@@ -294,11 +298,15 @@ export class MockScheduler {
       this.emit({ type: 'cargo:state', payload: { cargoId, status: 'placed', slotId, cargoType } });
       this.emitLog('info', `${cargoName} 已推入货位 ${slotId}`);
 
-      // 4) 原路倒车退回舱外待命位（不倒头、不原地掉头）。
-      const outbound = this.routeOutbound(cfg, home, target.x, target.z);
+      // 4) 退出：①先从货位**直线倒车**退出（不转向、不掉头）；②再正向驶出舱门回待命位。
       this.emitAgv(agvId, { phase: 'done', taskId, cargoId: null, cargoType: null });
-      this.emitLog('info', `${agvId} 原路倒车退出货舱，返回舱外待命位`);
-      await this.driveRoute(agvId, outbound, token, true);
+      this.emitLog('info', `${agvId} 直线倒车退出货位`);
+      const laneX = frontLaneX(cfg);
+      await this.driveRoute(agvId, [{ x: laneX, y: 0, z: target.z, yaw: 0 }], token, true);
+      const exitPath = this.routeForwardExit(cfg, home, laneX, target.z);
+      this.emit({ type: 'path:plan', payload: { agvId, waypoints: exitPath } });
+      this.emitLog('info', `${agvId} 正向驶出舱门，返回舱外待命位`);
+      await this.driveRoute(agvId, exitPath, token);
       this.emit({ type: 'slot:mark', payload: { slotId, state: 'clear' } });
     } catch (error) {
       if (token.cancelled) return;
@@ -342,28 +350,21 @@ export class MockScheduler {
   }
 
   /**
-   * 出舱路线（独立规划，不是入舱路径的简单反写）：
-   *  - 先沿目标排原路倒回机头空场（该排靠机头一侧的货位按"由机尾向机头填充"必为空）；
-   *  - 在机头空场里以 R=1.2 m 圆弧转向舱门方向，**转场线保持在 z≈-0.6**，离右舷壁 ≥2.4 m；
-   *  - 再对准门洞直线倒出舱外，回到待命位。
-   * 关键：转弯全部发生在无货位的机头空场，且与两侧舱壁、已放货柜都留出扫掠余量。
+   * 正向驶出舱门（倒车退出货位之后）：机头空场转场 → 对准门洞 → 驶出回待命位。
+   * 转弯全部在无货位的机头空场完成，并按 1.2 m 半径圆角化。
    */
-  private routeOutbound(cfg: CargoConfig, home: Pose3, targetX: number, targetZ: number): Pose3[] {
-    const laneX = frontLaneX(cfg);
+  private routeForwardExit(cfg: CargoConfig, home: Pose3, laneX: number, targetZ: number): Pose3[] {
     const doorX = cfg.doors.forward.x;
-    const stopX = targetX - PLACE_PUSH;
-    // 转场线：取机头空场中线附近（z=+0.4）。这样"转向舱门"的圆弧最外扩点离右舷壁仍有约 1 m，
-    // 且整段转场都发生在无货位的机头空场（x < 货位区起点），不会压到已放货物。
     const sweepZ = 0.4;
     const pts: Array<{ x: number; z: number }> = [
-      { x: stopX, z: targetZ },
       { x: laneX, z: targetZ },
       { x: laneX, z: sweepZ },
       { x: doorX, z: sweepZ },
+      { x: doorX, z: -1.0 },
       { x: doorX, z: home.z },
       { x: home.x, z: home.z }
     ];
-    return this.toReversePoses(this.filletRoute(pts, TURN_RADIUS), home.yaw);
+    return this.toPoses(this.filletRoute(pts, TURN_RADIUS), home.yaw);
   }
 
   /**
@@ -487,44 +488,44 @@ export class MockScheduler {
    * 半径受限的车会"擦过"个别圆角采样点，逐点握手会死等；因此一次把路径排入车端队列，
    * 由车端顺序执行（自带卡死跳过保护），调度侧只等最终停位。
    */
-  private async driveRoute(agvId: string, waypoints: Pose3[], token: RunToken, reverse = false): Promise<void> {
-    if (waypoints.length === 0) return;
+  private async driveRoute(agvId: string, waypoints: Pose3[], token: RunToken, reverse = false): Promise<boolean> {
+    if (waypoints.length === 0) return true;
     // 先清空车端残留指令，避免上一段路径（可能因受阻提前放弃）与新路径混跑。
     this.sendCommand({ agvId, type: 'stop' });
     for (const wp of waypoints) {
-      if (token.cancelled) return;
+      if (token.cancelled) return false;
       this.sendCommand({ agvId, type: 'moveTo', pose: wp, reverse });
     }
-    await this.waitAgvReach(agvId, waypoints[waypoints.length - 1], token);
+    return await this.waitAgvReach(agvId, waypoints[waypoints.length - 1], token);
   }
 
-  /** 等待到达终点：距离达标、或长时间无进展（不再死等，避免整条任务卡住）。 */
-  private async waitAgvReach(agvId: string, target: Pose3, token: RunToken): Promise<void> {
+  /** 等待到达终点：距离达标返回 true；长时间无进展返回 false（由调用方决定是否中止）。 */
+  private async waitAgvReach(agvId: string, target: Pose3, token: RunToken): Promise<boolean> {
     const probe = this.probe();
     const start = Date.now();
     let best = Number.POSITIVE_INFINITY;
     let stall = 0;
     for (;;) {
-      if (token.cancelled) return;
+      if (token.cancelled) return false;
       await this.pauseGate(token);
       const pose = probe?.agvPose(agvId);
       if (pose) {
         const d = poseDist(pose, target);
-        if (d < 0.5) return;
+        if (d < 0.5) return true;
         if (d < best - 0.05) {
           best = d;
           stall = 0;
         } else {
           stall += POLL_MS;
         }
-        if (stall > 6000) {
-          this.emitLog('warn', `${agvId} 接近航点受阻（距 ${d.toFixed(1)} m），继续后续动作`);
-          return;
+        if (stall > 8000) {
+          this.emitLog('warn', `${agvId} 接近航点受阻（距 ${d.toFixed(1)} m）`);
+          return false;
         }
       }
       if (Date.now() - start > MAX_LEG_WAIT_MS) {
-        this.emitLog('warn', `${agvId} 路径执行超时，继续后续动作`);
-        return;
+        this.emitLog('warn', `${agvId} 路径执行超时`);
+        return false;
       }
       await this.sleep(POLL_MS, token);
     }

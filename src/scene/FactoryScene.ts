@@ -496,7 +496,11 @@ export class FactoryScene {
           minX: cfg.hold.wallThickness + cfg.agv.length / 2,
           maxX: cfg.hold.length - cfg.hold.wallThickness - cfg.agv.length / 2,
           minZ: -(cfg.hold.floorWidth / 2),
-          holdZ: cfg.hold.floorWidth / 2
+          holdZ: cfg.hold.floorWidth / 2,
+          // 舱外只允许在门洞宽度内的待命走廊活动
+          corridorMinX: cfg.doors.forward.x - cfg.doors.forward.width / 2 + 0.55,
+          corridorMaxX: cfg.doors.forward.x + cfg.doors.forward.width / 2 - 0.55,
+          corridorMinZ: -7.4
         },
         onAction: (agvId, action) => this.onAgvAction(agvId, action)
       }))
