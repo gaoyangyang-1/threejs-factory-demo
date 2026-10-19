@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="飞机货运 AGV 智能运输数字孪生">
+  <defs>
+    <linearGradient id="agv" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1677ff" />
+      <stop offset="1" stop-color="#0fae6f" />
+    </linearGradient>
+  </defs>
+  <!-- 货舱六边形轮廓：与页面顶栏品牌标识同形 -->
+  <path
+    d="M32 3.5 L56.5 17.7 L56.5 46.3 L32 60.5 L7.5 46.3 L7.5 17.7 Z"
+    fill="url(#agv)"
+    fill-opacity="0.13"
+    stroke="url(#agv)"
+    stroke-width="4.5"
+    stroke-linejoin="round"
+  />
+  <!-- 左右两排货位 + 中央 AGV 通道 -->
+  <rect x="17.5" y="20.5" width="12.5" height="12.5" rx="2.4" fill="url(#agv)" />
+  <rect x="34" y="20.5" width="12.5" height="12.5" rx="2.4" fill="url(#agv)" fill-opacity="0.7" />
+  <rect x="22.5" y="37.5" width="19" height="6" rx="3" fill="url(#agv)" fill-opacity="0.85" />
+</svg>
