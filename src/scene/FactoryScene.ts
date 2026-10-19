@@ -491,6 +491,13 @@ export class FactoryScene {
         liftHeight: cfg.agv.liftHeight,
         defaultSpeed: cfg.agv.speed,
         home: role.home,
+        // 舱内可行驶边界：留出车体半长，越界即夹停（防穿墙）。
+        bounds: {
+          minX: cfg.hold.wallThickness + cfg.agv.length / 2,
+          maxX: cfg.hold.length - cfg.hold.wallThickness - cfg.agv.length / 2,
+          minZ: -(cfg.hold.floorWidth / 2),
+          holdZ: cfg.hold.floorWidth / 2
+        },
         onAction: (agvId, action) => this.onAgvAction(agvId, action)
       }))
     );

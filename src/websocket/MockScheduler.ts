@@ -363,7 +363,22 @@ export class MockScheduler {
       { x: doorX, z: home.z },
       { x: home.x, z: home.z }
     ];
-    return this.toPoses(this.filletRoute(pts, TURN_RADIUS), home.yaw);
+    return this.toReversePoses(this.filletRoute(pts, TURN_RADIUS), home.yaw);
+  }
+
+  /**
+   * 倒车用的位姿序列：车头朝向 = 行进方向 + π（车身始终朝里"倒退"）。
+   * 车端在显式倒车时直接跟踪该航向，不再按方位角追点，避免门口反复打方向/绕圈。
+   */
+  private toReversePoses(pts: Array<{ x: number; z: number }>, finalYaw: number): Pose3[] {
+    return pts.map((p, index) => {
+      if (index === pts.length - 1) return { x: p.x, y: 0, z: p.z, yaw: finalYaw };
+      const heading = headingTo(p, pts[index + 1]);
+      let yaw = heading + Math.PI;
+      while (yaw > Math.PI) yaw -= Math.PI * 2;
+      while (yaw < -Math.PI) yaw += Math.PI * 2;
+      return { x: p.x, y: 0, z: p.z, yaw };
+    });
   }
 
   private toPoses(pts: Array<{ x: number; z: number }>, finalYaw: number): Pose3[] {
@@ -474,6 +489,8 @@ export class MockScheduler {
    */
   private async driveRoute(agvId: string, waypoints: Pose3[], token: RunToken, reverse = false): Promise<void> {
     if (waypoints.length === 0) return;
+    // 先清空车端残留指令，避免上一段路径（可能因受阻提前放弃）与新路径混跑。
+    this.sendCommand({ agvId, type: 'stop' });
     for (const wp of waypoints) {
       if (token.cancelled) return;
       this.sendCommand({ agvId, type: 'moveTo', pose: wp, reverse });

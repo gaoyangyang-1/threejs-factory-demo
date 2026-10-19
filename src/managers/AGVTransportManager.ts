@@ -17,6 +17,8 @@ export interface AGVRuntimeOptions {
   liftHeight: number;
   defaultSpeed: number;
   home: Pose3;
+  /** 舱内可行驶边界（米，机体系）：超出即夹停，杜绝穿墙。 */
+  bounds?: { minX: number; maxX: number; minZ: number; holdZ: number };
   /** 执行 pick/place 动作时的回调。 */
   onAction?: (agvId: string, type: 'pick' | 'place') => void;
 }
@@ -35,8 +37,11 @@ interface AGVRuntime extends AGVRuntimeOptions {
   state: 'idle' | 'moving' | 'aligning' | 'pick' | 'place' | 'error';
   /** 当前 moveTo 是否倒车（车尾朝目标）。 */
   reverse: boolean;
-  /** 当前航点的最近距离与卡死计时（用于绕圈保护）。 */
-  bestDist: number;
+  /** 是否由指令显式指定倒车（显式时按指令给定航向走，不按"方位角"追点）。 */
+  reverseExplicit: boolean;
+  /** 卡死判定：上一帧位置与静止累计时长。 */
+  lastX: number;
+  lastZ: number;
   stuck: number;
   carrying: boolean;
   task: string;
@@ -211,7 +216,9 @@ export class AGVTransportManager {
       queue: [],
       state: 'idle',
       reverse: false,
-      bestDist: Number.POSITIVE_INFINITY,
+      reverseExplicit: false,
+      lastX: options.home.x,
+      lastZ: options.home.z,
       stuck: 0,
       carrying: false,
       task: '待命',
@@ -315,19 +322,17 @@ export class AGVTransportManager {
         const pose = current.pose!;
         const speed = current.speed ?? runtime.defaultSpeed;
         // 能退就不掉头：指令未指定时，比较"前进对准"与"倒车对准"的角度，取更小者。
-        runtime.reverse = current.reverse === true ? true : this.preferReverse(runtime, pose);
-        const dist = Math.hypot(pose.x - runtime.group.position.x, pose.z - runtime.group.position.z);
+        runtime.reverseExplicit = current.reverse === true;
+        runtime.reverse = runtime.reverseExplicit ? true : this.preferReverse(runtime, pose);
         this.driveToward(runtime, pose, speed, delta);
-        // 绕圈保护：最小转弯半径下个别航点可能追不到，距离不再缩小时跳过。
-        if (dist < runtime.bestDist - 0.02) {
-          runtime.bestDist = dist;
-          runtime.stuck = 0;
-        } else {
-          runtime.stuck += delta;
-        }
+        // 卡死保护：只在"真的没动"时计数（倒车转向时距离会暂时变大，不能用距离判据）。
+        const moved = Math.hypot(runtime.group.position.x - runtime.lastX, runtime.group.position.z - runtime.lastZ);
+        runtime.lastX = runtime.group.position.x;
+        runtime.lastZ = runtime.group.position.z;
+        if (moved < 0.012) runtime.stuck += delta;
+        else runtime.stuck = 0;
         if (this.arrived(runtime, pose) || runtime.stuck > STUCK_TIMEOUT) {
           runtime.queue.shift();
-          runtime.bestDist = Number.POSITIVE_INFINITY;
           runtime.stuck = 0;
         }
         break;
@@ -342,8 +347,12 @@ export class AGVTransportManager {
         break;
       }
       case 'stop':
-        runtime.queue.shift();
+        // 停止并清空整条指令队列（避免旧指令与新路径混跑）。
+        runtime.queue.length = 0;
         runtime.speed = 0;
+        runtime.reverse = false;
+        runtime.reverseExplicit = false;
+        runtime.stuck = 0;
         break;
       case 'pick': {
         // 货物直接落到顶升平台上挂载（挂载由场景 onAction 完成）。
@@ -400,8 +409,13 @@ export class AGVTransportManager {
     }
     // 行驶方向航向（车身前进方向定义为局部 +X 轴）。
     const bearing = Math.atan2(-dz, dx);
-    // 倒车时让车尾朝向目标：车头航向 = 目标方位 + π，全程不原地掉头。
-    const targetYaw = runtime.reverse ? bearing + Math.PI : bearing;
+    // 显式倒车指令：直接按指令给定的航向（路径切线反向）走，避免追"方位角"导致来回打方向；
+    // 自动倒车：车尾朝目标（方位角 + π）。
+    const targetYaw = runtime.reverse
+      ? runtime.reverseExplicit
+        ? pose.yaw
+        : bearing + Math.PI
+      : bearing;
     const err = yawDelta(runtime.group.rotation.y, targetYaw);
 
     // 关键：转弯半径约束 —— 角速度上限 = 速度 / 最小转弯半径。
@@ -414,9 +428,24 @@ export class AGVTransportManager {
     // 沿当前车头方向前进 / 后退。
     const signedSpeed = runtime.reverse ? -speedAbs : speedAbs;
     runtime.speed = signedSpeed;
-    const step = Math.min(distance, speedAbs * delta);
-    runtime.group.position.x += Math.cos(runtime.group.rotation.y) * step * (runtime.reverse ? -1 : 1);
-    runtime.group.position.z += -Math.sin(runtime.group.rotation.y) * step * (runtime.reverse ? -1 : 1);
+    const step = Math.min(distance, speedAbs * delta) * (runtime.reverse ? -1 : 1);
+    let nx = runtime.group.position.x + Math.cos(runtime.group.rotation.y) * step;
+    let nz = runtime.group.position.z - Math.sin(runtime.group.rotation.y) * step;
+
+    // 硬边界：舱内行驶时夹停在可行驶区域内（宁可停住，也不穿墙）。
+    const b = runtime.bounds;
+    if (b && nz > -b.holdZ + 0.05) {
+      const clampedX = THREE.MathUtils.clamp(nx, b.minX, b.maxX);
+      const clampedZ = THREE.MathUtils.clamp(nz, -b.holdZ + 0.05, b.holdZ - 0.05);
+      if (Math.abs(clampedX - nx) > 1e-6 || Math.abs(clampedZ - nz) > 1e-6) {
+        runtime.speed = 0;
+        nx = clampedX;
+        nz = clampedZ;
+        runtime.stuck += delta;
+      }
+    }
+    runtime.group.position.x = nx;
+    runtime.group.position.z = nz;
   }
 
   private turnToward(runtime: AGVRuntime, yaw: number, amount: number): void {
