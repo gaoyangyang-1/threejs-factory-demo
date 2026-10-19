@@ -298,15 +298,19 @@ export class MockScheduler {
       this.emit({ type: 'cargo:state', payload: { cargoId, status: 'placed', slotId, cargoType } });
       this.emitLog('info', `${cargoName} 已推入货位 ${slotId}`);
 
-      // 4) 退出：①先从货位**直线倒车**退出（不转向、不掉头）；②再正向驶出舱门回待命位。
+      // 4) 退出：倒车退出货位 + 正向驶出舱门，**一次性连续下发**（中间不停顿、不等待）。
       this.emitAgv(agvId, { phase: 'done', taskId, cargoId: null, cargoType: null });
-      this.emitLog('info', `${agvId} 直线倒车退出货位`);
       const laneX = frontLaneX(cfg);
-      await this.driveRoute(agvId, [{ x: laneX, y: 0, z: target.z, yaw: 0 }], token, true);
+      const lanePoint: Pose3 = { x: laneX, y: 0, z: target.z, yaw: 0 };
       const exitPath = this.routeForwardExit(cfg, home, laneX, target.z);
+      const legs = [
+        { pose: lanePoint, reverse: true },
+        ...exitPath.map((pose) => ({ pose, reverse: false }))
+      ];
       this.emit({ type: 'path:plan', payload: { agvId, waypoints: exitPath } });
-      this.emitLog('info', `${agvId} 正向驶出舱门，返回舱外待命位`);
-      await this.driveRoute(agvId, exitPath, token);
+      this.emitLog('info', `${agvId} 倒车退出货位后直接驶出舱门`);
+      const left = await this.driveMixed(agvId, legs, token);
+      if (!left) this.emitLog('warn', `${agvId} 未能按计划回到舱外待命位`);
       this.emit({ type: 'slot:mark', payload: { slotId, state: 'clear' } });
     } catch (error) {
       if (token.cancelled) return;
@@ -499,6 +503,24 @@ export class MockScheduler {
     return await this.waitAgvReach(agvId, waypoints[waypoints.length - 1], token);
   }
 
+  /**
+   * 混合挡位路径：每段自带"前进/倒车"标记，一次性排入车端队列。
+   * 车端会连续执行（不等调度），因此段与段之间不会出现"停车思考"的停顿。
+   */
+  private async driveMixed(
+    agvId: string,
+    legs: Array<{ pose: Pose3; reverse: boolean }>,
+    token: RunToken
+  ): Promise<boolean> {
+    if (legs.length === 0) return true;
+    this.sendCommand({ agvId, type: 'stop' });
+    for (const leg of legs) {
+      if (token.cancelled) return false;
+      this.sendCommand({ agvId, type: 'moveTo', pose: leg.pose, reverse: leg.reverse });
+    }
+    return await this.waitAgvReach(agvId, legs[legs.length - 1].pose, token);
+  }
+
   /** 等待到达终点：距离达标返回 true；长时间无进展返回 false（由调用方决定是否中止）。 */
   private async waitAgvReach(agvId: string, target: Pose3, token: RunToken): Promise<boolean> {
     const probe = this.probe();
@@ -511,14 +533,15 @@ export class MockScheduler {
       const pose = probe?.agvPose(agvId);
       if (pose) {
         const d = poseDist(pose, target);
-        if (d < 0.5) return true;
+        // 阈值必须大于车端到位半径（倒车 0.55 m），否则每段都要等到超时，表现为"停车思考"。
+        if (d < 0.8) return true;
         if (d < best - 0.05) {
           best = d;
           stall = 0;
         } else {
           stall += POLL_MS;
         }
-        if (stall > 8000) {
+        if (stall > 3000) {
           this.emitLog('warn', `${agvId} 接近航点受阻（距 ${d.toFixed(1)} m）`);
           return false;
         }
