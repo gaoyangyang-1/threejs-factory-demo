@@ -20,11 +20,16 @@ import { defaultCargoConfig } from '@/config/cargo';
 import { AGVTransportManager } from '@/managers/AGVTransportManager';
 import { CargoManager } from '@/managers/CargoManager';
 import type { DoorId, PlannedPath, Pose3, SceneCommand } from '@/types/cargo';
-import { agvRoles, initialCargoSpecs, slotCells, starboardOuterZ } from '@/utils/layout';
+import { agvRoles, initialCargoSpecs, slotCellOf, slotCells, starboardOuterZ } from '@/utils/layout';
 
 interface FactorySceneOptions {
   container: HTMLElement;
+  /** 安全告警回调（贴近舱壁/干涉时上报 UI 日志）。 */
+  onSafety?: (level: 'warn' | 'error', message: string) => void;
 }
+
+/** 安全间隙阈值（m）：低于该值即报警。 */
+const CLEARANCE_WARN = 0.25;
 
 interface CargoTween {
   mesh: THREE.Group;
@@ -75,6 +80,11 @@ export class FactoryScene {
   private agvManager!: AGVTransportManager;
   private ground?: THREE.Mesh;
   private readonly world = new THREE.Group();
+  private readonly onSafety?: (level: 'warn' | 'error', message: string) => void;
+  /** 间隙告警环（每台 AGV 一个，临近舱壁时显示）。 */
+  private readonly safetyRings = new Map<string, THREE.Mesh>();
+  private readonly safetyCooldown = new Map<string, number>();
+  private safetyFrame = 0;
   private readonly pathLayer = new THREE.Group();
   private readonly cargoTweens = new Map<string, CargoTween>();
   private readonly obstacleMarkers: ObstacleMarker[] = [];
@@ -93,6 +103,7 @@ export class FactoryScene {
 
   constructor(options: FactorySceneOptions) {
     this.container = options.container;
+    this.onSafety = options.onSafety;
     this.compactView = window.matchMedia('(max-width: 900px)').matches;
 
     this.camera = new THREE.PerspectiveCamera(46, 1, 0.1, 180);
@@ -454,6 +465,8 @@ export class FactoryScene {
     this.pickupTargets.clear();
     this.placeTargets.clear();
     this.slotPulses.clear();
+    this.safetyRings.clear();
+    this.safetyCooldown.clear();
 
     const cfg = this.config;
     // 整机（机头锥段 + 货舱 + 机尾锥段）中心，用作地面与取景基准。
@@ -885,6 +898,9 @@ export class FactoryScene {
     this.animateCargoTweens(delta);
     this.animateObstacles();
     this.animateSlotPulses();
+    // 每 6 帧做一次间隙校核（AGV+货物外廓 vs 舱壁/已放货柜），贴近即报警。
+    this.safetyFrame = (this.safetyFrame + 1) % 6;
+    if (this.safetyFrame === 0) this.checkSafety();
     this.composer.render();
   };
 
@@ -901,6 +917,137 @@ export class FactoryScene {
       mesh.rotation.y = tween.fromYaw + Math.atan2(Math.sin(diff), Math.cos(diff)) * ease;
       if (tween.progress >= 1) this.cargoTweens.delete(id);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 安全间隙校核：AGV（含所载货物）外廓 vs 舱壁 / 已放货柜
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 用"AGV+货物"的有向矩形（OBB）做间隙校核：
+   *  - 舱壁：左舷/右舷（右舷按门洞开口豁免）/机头隔框/机尾隔框；
+   *  - 已放货柜：OBB 与货柜包围盒的分离距离（SAT，取各轴最大间隙，负值表示重叠）。
+   * 舱外待命（z 在右舷壁之外）不做舱壁判定，避免把"在门外排队"误报成穿墙。
+   */
+  private checkSafety(): void {
+    if (!this.agvManager) return;
+    const cfg = this.config;
+    const wallZ = cfg.hold.floorWidth / 2;
+    const frontX = cfg.hold.wallThickness;
+    const aftX = cfg.hold.length - cfg.hold.wallThickness;
+    const doorSpec = cfg.doors.forward;
+    const holeMin = doorSpec.x - doorSpec.width / 2;
+    const holeMax = doorSpec.x + doorSpec.width / 2;
+    const now = performance.now();
+
+    for (const role of agvRoles(cfg)) {
+      const pose = this.getAgvPose(role.id);
+      if (!pose) continue;
+      const payload = this.agvManager.getPayload(role.id);
+      const cargoSpec = payload ? cfg.uld[payload.cargoType as keyof typeof cfg.uld] : null;
+      const halfL = Math.max(cfg.agv.length, cargoSpec?.length ?? 0) / 2;
+      const halfW = Math.max(cfg.agv.width, cargoSpec?.width ?? 0) / 2;
+      const c = Math.cos(pose.yaw);
+      const s = Math.sin(pose.yaw);
+
+      const xs: number[] = [];
+      const zs: number[] = [];
+      for (const a of [-1, 1]) {
+        for (const b of [-1, 1]) {
+          xs.push(pose.x + a * halfL * c + b * halfW * s);
+          zs.push(pose.z - a * halfL * s + b * halfW * c);
+        }
+      }
+      const xMin = Math.min(...xs);
+      const xMax = Math.max(...xs);
+      const zMin = Math.min(...zs);
+      const zMax = Math.max(...zs);
+
+      let clearance = Infinity;
+      let what = '';
+
+      // 舱外待命/进出舱门阶段（整机在右舷壁之外）不做舱壁判定。
+      const outsideHold = zMax < -wallZ + 0.02;
+      if (!outsideHold) {
+        const candidates: Array<[number, string]> = [
+          [wallZ - zMax, '左舷舱壁'],
+          [xMin - frontX, '机头隔框'],
+          [aftX - xMax, '机尾隔框']
+        ];
+        // 右舷壁：整个车体 x 落在门洞内且正在穿越时豁免。
+        const inDoorBand = xMin >= holeMin - 0.05 && xMax <= holeMax + 0.05;
+        if (!inDoorBand) candidates.push([Math.min(Math.abs(zMax + wallZ), Math.abs(zMin + wallZ)), '右舷舱壁']);
+        for (const [gap, name] of candidates) {
+          if (gap < clearance) {
+            clearance = gap;
+            what = name;
+          }
+        }
+      }
+
+      // 与已放货柜的分离距离（SAT 近似，负值=重叠）。
+      if (this.cargoManager) {
+        this.cargoManager.occupancy.forEach((cargoId, slotId) => {
+          const cell = slotCellOf(cfg, slotId);
+          if (!cell || Math.hypot(cell.x - pose.x, cell.z - pose.z) > 6) return;
+          const mesh = this.cargoManager.cargo.get(cargoId);
+          const spec = cfg.uld[(mesh?.userData.cargoType ?? 'AKE') as keyof typeof cfg.uld];
+          const hx = spec.length / 2;
+          const hz = spec.width / 2;
+          const dirX = c;
+          const dirZ = -s;
+          const latX = s;
+          const latZ = c;
+          const dx = cell.x - pose.x;
+          const dz = cell.z - pose.z;
+          const gapX = Math.abs(dx) - (hx + halfL * Math.abs(dirX) + halfW * Math.abs(latX));
+          const gapZ = Math.abs(dz) - (hz + halfL * Math.abs(dirZ) + halfW * Math.abs(latZ));
+          const gapD = Math.abs(dx * dirX + dz * dirZ) - (halfL + hx * Math.abs(dirX) + hz * Math.abs(dirZ));
+          const gapL = Math.abs(dx * latX + dz * latZ) - (halfW + hx * Math.abs(latX) + hz * Math.abs(latZ));
+          const gap = Math.max(gapX, gapZ, gapD, gapL);
+          if (gap < clearance) {
+            clearance = gap;
+            what = `货位 ${slotId}`;
+          }
+        });
+      }
+
+      if (!Number.isFinite(clearance)) continue;
+
+      const ring = this.ensureSafetyRing(role.id);
+      const alarming = clearance < CLEARANCE_WARN;
+      ring.visible = alarming;
+      if (alarming) {
+        ring.position.set(pose.x, 0.05, pose.z);
+        const mat = ring.material as THREE.MeshBasicMaterial;
+        mat.opacity = clearance < 0 ? 0.55 : 0.3;
+        const last = this.safetyCooldown.get(role.id) ?? 0;
+        if (now - last > 1800) {
+          this.safetyCooldown.set(role.id, now);
+          const mm = Math.round(Math.abs(clearance) * 1000);
+          this.onSafety?.(
+            clearance < 0 ? 'error' : 'warn',
+            clearance < 0
+              ? `${role.id} 外廓与${what}干涉约 ${mm} mm，请检查路径与货位`
+              : `${role.id} 距${what}仅 ${mm} mm（警戒 < ${Math.round(CLEARANCE_WARN * 1000)} mm）`
+          );
+        }
+      }
+    }
+  }
+
+  private ensureSafetyRing(agvId: string): THREE.Mesh {
+    const existing = this.safetyRings.get(agvId);
+    if (existing) return existing;
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(1.25, 1.55, 40),
+      new THREE.MeshBasicMaterial({ color: C_RED, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.visible = false;
+    this.world.add(ring);
+    this.safetyRings.set(agvId, ring);
+    return ring;
   }
 
   private animateObstacles(): void {

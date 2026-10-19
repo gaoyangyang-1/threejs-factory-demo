@@ -74,6 +74,24 @@ export function rackXEnd(config: CargoConfig): number {
   return cell ? cell.x + config.uld.AKE.length / 2 : config.slotStartX;
 }
 
+/** 货物在货位内原地转向时的扫掠半径（半对角线 + 安全余量）。 */
+export function cargoSwingRadius(config: CargoConfig, type: CargoType): number {
+  const spec = config.uld[type];
+  return Math.hypot(spec.length / 2, spec.width / 2) + 0.06;
+}
+
+/**
+ * 该货型允许放置的货位排：排中心到侧壁内沿的净距必须 ≥ 扫掠半径，
+ * 否则载货 AGV 在两侧排转弯/对位时会扫到舱壁（AGV 与货物穿墙）。
+ * 默认参数下：AKE 三排都可放；PMX/PAX 只能放中央排。
+ */
+export function rowsForCargo(config: CargoConfig, type: CargoType): Array<'L' | 'R' | 'C'> {
+  const swing = cargoSwingRadius(config, type);
+  const wallInnerZ = config.hold.floorWidth / 2;
+  const rows = SLOT_SIDE_ORDER.filter((side) => wallInnerZ - Math.abs(slotRowZ(config, side)) >= swing);
+  return rows.length > 0 ? [...rows] : ['C'];
+}
+
 /**
  * 候选货位：给定类型与占用判定，按 `preferSide` 优先，**列号由大到小**（机尾→机头）扫描，
  * 返回首个连续空列适配的货位 id（演示层使用）。
@@ -86,14 +104,16 @@ export function fitSlotOf(
   config: CargoConfig,
   type: CargoType,
   isFree: (slotId: string) => boolean,
-  preferSide?: 'L' | 'R' | 'C'
+  preferSide?: 'L' | 'R' | 'C',
+  sides: Array<'L' | 'R' | 'C'> = [...SLOT_SIDE_ORDER]
 ): string | null {
   const span = slotSpanOf(config, type);
   const columns = config.slotCount;
-  const sides: Array<'L' | 'R' | 'C'> = preferSide
-    ? [preferSide, ...SLOT_SIDE_ORDER.filter((s) => s !== preferSide)]
-    : [...SLOT_SIDE_ORDER];
-  for (const side of sides) {
+  const order: Array<'L' | 'R' | 'C'> = preferSide
+    ? [preferSide, ...sides.filter((s) => s !== preferSide)]
+    : [...sides];
+  for (const side of order) {
+    if (!sides.includes(side)) continue;
     for (let start = columns - span; start >= 0; start -= 1) {
       let ok = true;
       for (let c = start; c < start + span; c++) {
@@ -139,8 +159,9 @@ export function frontLaneX(config: CargoConfig): number {
   return Math.max(config.doors.forward.x + 0.6, rackXStart(config) - 1.2);
 }
 
-/** 入位前的推送间距：AGV 停在目标列前方该距离处，货物沿 +X 推入货位。 */
-export const PLACE_PUSH = 1.8;
+/** 入位前的推送间距：AGV 停在目标列前方该距离处，货物沿 +X 推入货位。
+ *  取 2.2 m 以留出"AGV 车体 + 货物半长"的净距，避免停位时外廓压到目标货位。 */
+export const PLACE_PUSH = 2.2;
 
 export interface AgvRole {
   id: string;

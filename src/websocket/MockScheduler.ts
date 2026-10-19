@@ -43,9 +43,12 @@ export interface MockSchedulerOptions {
   config: () => CargoConfig;
 }
 
-const ARRIVE_DIST = 0.16;
+const ARRIVE_DIST = 0.35;
 const MAX_LEG_WAIT_MS = 240000;
 const POLL_MS = 80;
+/** 与车端一致的最小转弯半径（m）：路径拐点按该半径圆角化，避免车端"追直角"导致甩尾外扩。 */
+const TURN_RADIUS = 1.2;
+const ARC_STEP = Math.PI / 9;
 
 function poseDist(a: Pose3, b: Pose3): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
@@ -335,7 +338,7 @@ export class MockScheduler {
       targetZ > -0.1
         ? { agvId, pose: { x: laneX + 0.6, y: 0, z: targetZ + 1.25, yaw: 0 }, radius: 0.45 }
         : null;
-    return { waypoints: this.toPoses(pts, 0), obstacle };
+    return { waypoints: this.toPoses(this.filletRoute(pts, TURN_RADIUS), 0), obstacle };
   }
 
   /** 出舱路线：入舱路线原样反向，由车端倒车沿原路径退出。 */
@@ -349,6 +352,7 @@ export class MockScheduler {
       { x: entry.x, z: entry.z },
       { x: home.x, z: home.z }
     ];
+    // 倒车退出沿用原折线（不再圆角化）：倒车时车尾沿路径走，额外加圆角反而让车尾追不上点位。
     return this.toPoses(pts, home.yaw);
   }
 
@@ -357,6 +361,82 @@ export class MockScheduler {
       const isLast = index === pts.length - 1;
       return { x: p.x, y: 0, z: p.z, yaw: isLast ? finalYaw : headingTo(p, pts[index + 1]) };
     });
+  }
+
+  /**
+   * 折线圆角化：把每个拐点替换成半径 R 的圆弧采样点。
+   * 这样车端按点跟踪时，转向在圆弧上自然发生，不会为"追拐点"而外扩扫到舱壁。
+   */
+  private filletRoute(pts: Array<{ x: number; z: number }>, radius: number): Array<{ x: number; z: number }> {
+    if (pts.length < 3) return pts;
+    const out: Array<{ x: number; z: number }> = [pts[0]];
+    for (let i = 1; i < pts.length - 1; i += 1) {
+      const a = pts[i - 1];
+      const p = pts[i];
+      const b = pts[i + 1];
+      const ux0 = p.x - a.x;
+      const uz0 = p.z - a.z;
+      const vx0 = b.x - p.x;
+      const vz0 = b.z - p.z;
+      const l1 = Math.hypot(ux0, uz0);
+      const l2 = Math.hypot(vx0, vz0);
+      if (l1 < 1e-6 || l2 < 1e-6) {
+        out.push(p);
+        continue;
+      }
+      const ux = ux0 / l1;
+      const uz = uz0 / l1;
+      const vx = vx0 / l2;
+      const vz = vz0 / l2;
+      const cosT = Math.max(-1, Math.min(1, ux * vx + uz * vz));
+      const theta = Math.acos(cosT);
+      if (theta < 0.06) {
+        out.push(p);
+        continue;
+      }
+      // 切线长度受相邻边长限制，避免圆角吃掉整段直线。
+      const tMax = Math.min(l1, l2) * 0.45;
+      let tangent = radius * Math.tan(theta / 2);
+      let r = radius;
+      if (tangent > tMax) {
+        r = tMax / Math.tan(theta / 2);
+        tangent = r * Math.tan(theta / 2);
+      }
+      const ex = p.x - ux * tangent;
+      const ez = p.z - uz * tangent;
+      const xx = p.x + vx * tangent;
+      const xz = p.z + vz * tangent;
+      // 两个候选圆心（距离 E 点 r、位于法线两侧），取圆弧中点离拐点更近的那个（即内侧）。
+      const nx = -uz;
+      const nz = ux;
+      let best: { cx: number; cz: number; sweep: number; mid: { x: number; z: number } } | null = null;
+      for (const sign of [1, -1]) {
+        const cx = ex + nx * r * sign;
+        const cz = ez + nz * r * sign;
+        const a0 = Math.atan2(ez - cz, ex - cx);
+        const a1 = Math.atan2(xz - cz, xx - cx);
+        let sweep = a1 - a0;
+        while (sweep > Math.PI) sweep -= Math.PI * 2;
+        while (sweep < -Math.PI) sweep += Math.PI * 2;
+        const mid = { x: cx + Math.cos(a0 + sweep / 2) * r, z: cz + Math.sin(a0 + sweep / 2) * r };
+        const dMid = Math.hypot(mid.x - p.x, mid.z - p.z);
+        if (!best || dMid < Math.hypot(best.mid.x - p.x, best.mid.z - p.z)) best = { cx, cz, sweep, mid };
+      }
+      if (!best) {
+        out.push(p);
+        continue;
+      }
+      const { cx, cz, sweep } = best;
+      const a0 = Math.atan2(ez - cz, ex - cx);
+      const steps = Math.max(3, Math.ceil(Math.abs(sweep) / ARC_STEP));
+      for (let k = 1; k < steps; k += 1) {
+        const ang = a0 + (sweep * k) / steps;
+        out.push({ x: cx + Math.cos(ang) * r, z: cz + Math.sin(ang) * r });
+      }
+      out.push({ x: xx, z: xz });
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -377,24 +457,48 @@ export class MockScheduler {
     this.emit({ type: 'log', payload: { level, message } });
   }
 
+  /**
+   * 下发整条路径并等待终点到达。
+   * 半径受限的车会"擦过"个别圆角采样点，逐点握手会死等；因此一次把路径排入车端队列，
+   * 由车端顺序执行（自带卡死跳过保护），调度侧只等最终停位。
+   */
   private async driveRoute(agvId: string, waypoints: Pose3[], token: RunToken, reverse = false): Promise<void> {
+    if (waypoints.length === 0) return;
     for (const wp of waypoints) {
       if (token.cancelled) return;
       this.sendCommand({ agvId, type: 'moveTo', pose: wp, reverse });
-      await this.waitAgvAt(agvId, wp, token);
     }
+    await this.waitAgvReach(agvId, waypoints[waypoints.length - 1], token);
   }
 
-  private async waitAgvAt(agvId: string, target: Pose3, token: RunToken): Promise<void> {
+  /** 等待到达终点：距离达标、或长时间无进展（不再死等，避免整条任务卡住）。 */
+  private async waitAgvReach(agvId: string, target: Pose3, token: RunToken): Promise<void> {
     const probe = this.probe();
     const start = Date.now();
+    let best = Number.POSITIVE_INFINITY;
+    let stall = 0;
     for (;;) {
       if (token.cancelled) return;
       await this.pauseGate(token);
       const pose = probe?.agvPose(agvId);
-      // 只判位置：车头朝向由"边走边转"的转弯半径约束决定，不额外要求对准。
-      if (pose && poseDist(pose, target) < ARRIVE_DIST + 0.1) return;
-      if (Date.now() - start > MAX_LEG_WAIT_MS) throw new Error(`${agvId} 长时间未到达目标位`);
+      if (pose) {
+        const d = poseDist(pose, target);
+        if (d < 0.5) return;
+        if (d < best - 0.05) {
+          best = d;
+          stall = 0;
+        } else {
+          stall += POLL_MS;
+        }
+        if (stall > 6000) {
+          this.emitLog('warn', `${agvId} 接近航点受阻（距 ${d.toFixed(1)} m），继续后续动作`);
+          return;
+        }
+      }
+      if (Date.now() - start > MAX_LEG_WAIT_MS) {
+        this.emitLog('warn', `${agvId} 路径执行超时，继续后续动作`);
+        return;
+      }
       await this.sleep(POLL_MS, token);
     }
   }

@@ -75,7 +75,8 @@ export const defaultCargoConfig: CargoConfig = {
     wallThickness: 0.18
   },
   nose: { length: 9.0 },
-  slotZ: 2.3,
+  /** 左右两排货位中心 |Z|=2.1：留出载货 AGV 转弯扫掠余量，避免扫到舱壁。 */
+  slotZ: 2.1,
   slotPitch: 1.72,
   slotStartX: 6.8,
   slotCount: 6,
@@ -90,8 +91,8 @@ export const defaultCargoConfig: CargoConfig = {
     width: 1.1,
     height: 0.52,
     liftHeight: 0.35,
-    /** 巡航速度：1 m / 5 s = 0.2 m/s（面板可改）。 */
-    speed: 0.2
+    /** 巡航速度：0.8 m/s（面板可改）。 */
+    speed: 0.8
   },
   uld: {
     AKE: { length: 1.562, width: 1.534, height: 1.626 },

@@ -42,7 +42,11 @@ function forwardToScene(event: AlgorithmEvent) {
 }
 
 onMounted(() => {
-  scene = new FactoryScene({ container: containerRef.value! });
+  scene = new FactoryScene({
+    container: containerRef.value!,
+    // 间隙/干涉告警直接进 UI 日志。
+    onSafety: (level, message) => store.pushLog(level, message)
+  });
   scene.start();
   transportBus.registerProbe({
     agvPose: (id) => scene!.getAgvPose(id),

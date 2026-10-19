@@ -35,6 +35,9 @@ interface AGVRuntime extends AGVRuntimeOptions {
   state: 'idle' | 'moving' | 'aligning' | 'pick' | 'place' | 'error';
   /** 当前 moveTo 是否倒车（车尾朝目标）。 */
   reverse: boolean;
+  /** 当前航点的最近距离与卡死计时（用于绕圈保护）。 */
+  bestDist: number;
+  stuck: number;
   carrying: boolean;
   task: string;
   speed: number;
@@ -48,12 +51,14 @@ interface AGVRuntime extends AGVRuntimeOptions {
   steerAngle: number;
 }
 
-const ARRIVE_DIST = 0.12;
+const ARRIVE_DIST = 0.2;
 const ARRIVE_YAW = 0.06;
 /** 最小转弯半径（m）：AGV 只能边走边转，不允许原地掉头。 */
 const TURN_RADIUS = 1.2;
 /** 航向跟踪增益（越大越"贴"目标航向，但受转弯半径限幅）。 */
 const HEADING_GAIN = 2.4;
+/** 追点卡死判定：最近距离不再缩小超过该时长（s）则跳过该航点，避免绕圈死锁。 */
+const STUCK_TIMEOUT = 1.6;
 
 export class AGVTransportManager {
   readonly group = new THREE.Group();
@@ -95,6 +100,34 @@ export class AGVTransportManager {
   setTask(id: string, task: string): void {
     const runtime = this.runtimes.get(id);
     if (runtime) runtime.task = task;
+  }
+
+  /** 取当前载货（用于转弯扫掠与间隙校核）。 */
+  getPayload(agvId: string): { cargoId: string; cargoType: string } | null {
+    const runtime = this.runtimes.get(agvId);
+    const child = runtime?.payload.children[0] as (THREE.Object3D & { userData?: { id?: string; cargoType?: string } }) | undefined;
+    if (!child?.userData?.cargoType) return null;
+    return { cargoId: child.userData.id ?? '', cargoType: child.userData.cargoType };
+  }
+
+  /** 是否载货。 */
+  isCarrying(agvId: string): boolean {
+    return this.runtimes.get(agvId)?.carrying ?? false;
+  }
+
+  /**
+   * 是否应该倒车：目标在车尾方向时直接后退，避免在货舱内掉头。
+   * 距离很近时保持当前挡位，防止来回抖动。
+   */
+  private preferReverse(runtime: AGVRuntime, pose: Pose3): boolean {
+    const dx = pose.x - runtime.group.position.x;
+    const dz = pose.z - runtime.group.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist < 0.4) return runtime.reverse;
+    const bearing = Math.atan2(-dz, dx);
+    const errForward = Math.abs(yawDelta(runtime.group.rotation.y, bearing));
+    const errReverse = Math.abs(yawDelta(runtime.group.rotation.y, bearing + Math.PI));
+    return errReverse + 0.1 < errForward;
   }
 
   getRuntime(id: string): { pose: Pose3; state: string; battery: number; task: string; speed: number } | null {
@@ -178,6 +211,8 @@ export class AGVTransportManager {
       queue: [],
       state: 'idle',
       reverse: false,
+      bestDist: Number.POSITIVE_INFINITY,
+      stuck: 0,
       carrying: false,
       task: '待命',
       speed: options.defaultSpeed,
@@ -279,10 +314,21 @@ export class AGVTransportManager {
       case 'moveTo': {
         const pose = current.pose!;
         const speed = current.speed ?? runtime.defaultSpeed;
-        runtime.reverse = current.reverse === true;
+        // 能退就不掉头：指令未指定时，比较"前进对准"与"倒车对准"的角度，取更小者。
+        runtime.reverse = current.reverse === true ? true : this.preferReverse(runtime, pose);
+        const dist = Math.hypot(pose.x - runtime.group.position.x, pose.z - runtime.group.position.z);
         this.driveToward(runtime, pose, speed, delta);
-        if (this.arrived(runtime, pose)) {
+        // 绕圈保护：最小转弯半径下个别航点可能追不到，距离不再缩小时跳过。
+        if (dist < runtime.bestDist - 0.02) {
+          runtime.bestDist = dist;
+          runtime.stuck = 0;
+        } else {
+          runtime.stuck += delta;
+        }
+        if (this.arrived(runtime, pose) || runtime.stuck > STUCK_TIMEOUT) {
           runtime.queue.shift();
+          runtime.bestDist = Number.POSITIVE_INFINITY;
+          runtime.stuck = 0;
         }
         break;
       }

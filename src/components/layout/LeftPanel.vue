@@ -59,26 +59,15 @@
         </div>
       </section>
 
-      <!-- 舱门（仅一个前舱门） -->
+      <!-- 舱门（仅一处、常开；参数不在面板暴露） -->
       <section class="card">
-        <div class="card-title">前货舱门（右舷 -Z · 位置/洞口尺寸）</div>
-        <div class="door-grid">
-          <div v-for="door in (['forward'] as const)" :key="door" class="door-box">
-            <div class="door-head">
-              <strong>前舱门（AGV 旁 · 常开）</strong>
-              <span class="c-chip green">常开</span>
-            </div>
-            <div v-for="field in doorFields" :key="field.key" class="c-field">
-              <label>{{ field.label }}</label>
-              <span class="input-wrap">
-                <input v-model.number="doorProxy[door][field.key]" type="number" class="c-input" :step="field.step" :min="field.min" />
-                <span class="unit">m</span>
-              </span>
-            </div>
-            <div class="hint">舱门常开、无门扇：整个系统只保留 AGV 旁边的这一处舱门，其余门已取消。</div>
-            <div class="hint dim">门洞净高需 ≥ 载货总高（约 2.3 m），否则载货 AGV 无法穿门进舱。</div>
-          </div>
+        <div class="card-title">舱门</div>
+        <div class="door-head">
+          <strong>前舱门（AGV 进舱侧 · 常开）</strong>
+          <span class="c-chip green">常开</span>
         </div>
+        <div class="hint">全机只保留 AGV 进舱这一处舱门：常开、无门扇；另一侧（左舷）为整面封闭舱壁，其余门已全部取消。</div>
+        <div class="hint dim">门洞尺寸按载货 AGV 总高预留（约 2.5 m），为固定结构参数，不再由面板调整。</div>
       </section>
 
       <!-- AGV 参数 -->
@@ -149,7 +138,6 @@ function cloneConfig(c: CargoConfig): CargoConfig {
 const form = reactive<CargoConfig>(cloneConfig(store.config));
 /** 数字控件代理（放宽 key 类型便于模板动态索引）。 */
 const uldProxy = form.uld as unknown as Record<string, Record<string, number>>;
-const doorProxy = form.doors as unknown as Record<'forward', Record<string, number>>;
 const noseProxy = form.nose as unknown as Record<string, number>;
 const holdProxy = form.hold as unknown as Record<string, number>;
 const agvProxy = form.agv as unknown as Record<string, number>;
@@ -196,11 +184,6 @@ const slotFields: FieldDef[] = [
   { key: 'slotCount', label: '每排列数', step: 1, min: 1, unit: '列' },
   { key: 'initialAkePerSide', label: '初始 AKE/排', step: 1, min: 0, unit: '件' }
 ];
-const doorFields: FieldDef[] = [
-  { key: 'x', label: '中心 X', step: 0.1, min: 0.5 },
-  { key: 'width', label: '门洞宽', step: 0.1, min: 0.5 },
-  { key: 'height', label: '门洞高', step: 0.1, min: 0.5 }
-];
 const agvFields: FieldDef[] = [
   { key: 'count', label: '数量', step: 1, min: 1, unit: '台' },
   { key: 'length', label: '车长', step: 0.05, min: 0.5 },
@@ -224,9 +207,6 @@ function patchFromForm(): Partial<CargoConfig> {
     slotStartX: form.slotStartX,
     slotCount: Math.max(1, Math.round(form.slotCount)),
     initialAkePerSide: Math.max(0, Math.round(form.initialAkePerSide)),
-    doors: {
-      forward: { ...form.doors.forward } as DoorSpec
-    },
     agv: { ...form.agv, count: Math.max(1, Math.round(form.agv.count)) },
     uld: {
       AKE: { ...form.uld.AKE } as UldSpec,

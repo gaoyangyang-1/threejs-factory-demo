@@ -18,7 +18,7 @@ import type {
   TaskMode,
   TaskStatus
 } from '@/types/cargo';
-import { agvRoles, fitSlotOf, initialCargoSpecs, parseSlotId, slotCells, slotSpanOf, SLOT_SIDE_ORDER } from '@/utils/layout';
+import { agvRoles, fitSlotOf, initialCargoSpecs, parseSlotId, rowsForCargo, slotCells, slotSpanOf } from '@/utils/layout';
 import { formatClock, createId } from '@/utils/time';
 import { transportBus } from '@/websocket/TransportMessageBus';
 
@@ -342,14 +342,15 @@ export const useCargoStore = defineStore('cargo', {
     // 任务
     // ------------------------------------------------------------------
 
-    /** 候选槽位（含列跨度适配，供下拉选择/自动分配）。 */
+    /** 候选货位（含列跨度适配 + 货型可放排位，供下拉选择/自动分配）。 */
     candidateSlots(type: CargoType): string[] {
       const occupied = occupiedSetOf(this.config, this.cargos);
       const pending = new Set(this.pendingSlots);
       const isFree = (slotId: string) => !occupied.has(slotId) && !pending.has(slotId);
       const span = slotSpanOf(this.config, type);
+      const rows = rowsForCargo(this.config, type);
       const result: string[] = [];
-      for (const side of SLOT_SIDE_ORDER) {
+      for (const side of rows) {
         for (let start = this.config.slotCount - span; start >= 0; start -= 1) {
           let ok = true;
           for (let c = start; c < start + span; c++) {
@@ -387,10 +388,12 @@ export const useCargoStore = defineStore('cargo', {
         const occupied = occupiedSetOf(this.config, this.cargos);
         const isFree = (slotId: string) => !occupied.has(slotId) && !this.pendingSlots.includes(slotId);
         if (input.mode === 'single') {
+          const rows = rowsForCargo(this.config, input.type);
           const prefer = input.slotId && isFree(input.slotId) ? input.slotId : null;
-          const slotId = prefer ?? fitSlotOf(this.config, input.type, isFree);
+          const slotId = prefer ?? fitSlotOf(this.config, input.type, isFree, undefined, rows);
           if (!slotId) {
-            this.pushLog('warn', `货舱内没有适配 ${ULD_META[input.type].label} 的空闲货位`);
+            const hint = rows.length < 3 ? '（该货型仅中央排净宽足够，两侧排无法安全转弯）' : '';
+            this.pushLog('warn', `货舱内没有适配 ${ULD_META[input.type].label} 的空闲货位${hint}`);
             return null;
           }
           this.reserveSpan(input.type, slotId);
@@ -399,8 +402,9 @@ export const useCargoStore = defineStore('cargo', {
           const count = Math.max(2, Math.min(6, input.count ?? 3));
           for (let i = 0; i < count; i++) {
             const type = i % 2 === 0 ? input.type : 'AKE';
-            const side = SLOT_SIDE_ORDER[i % SLOT_SIDE_ORDER.length];
-            const slotId = fitSlotOf(this.config, type, isFree, side);
+            const rows = rowsForCargo(this.config, type);
+            const side = rows[i % rows.length];
+            const slotId = fitSlotOf(this.config, type, isFree, side, rows);
             if (!slotId) break;
             this.reserveSpan(type, slotId);
             items.push({ cargoType: type, slotId });
