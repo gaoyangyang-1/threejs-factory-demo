@@ -987,9 +987,14 @@ export class FactoryScene {
           [xMin - frontX, '机头隔框'],
           [aftX - xMax, '机尾隔框']
         ];
-        // 右舷壁：整个车体 x 落在门洞内且正在穿越时豁免。
-        const inDoorBand = xMin >= holeMin - 0.05 && xMax <= holeMax + 0.05;
-        if (!inDoorBand) candidates.push([Math.min(Math.abs(zMax + wallZ), Math.abs(zMin + wallZ)), '右舷舱壁']);
+        // 右舷壁：只对**落在线外（门洞以外）的角点**做判定。
+        // 之前"整个车体都在门洞内才豁免"的写法，会让车体一半在门内一半在墙里时整段跳过检查，
+        // 于是最右一列货物在门口转弯时穿墙也查不出来。
+        const solidCorners = xs.map((x, i) => (x < holeMin || x > holeMax ? zs[i] : null)).filter((z): z is number => z !== null);
+        if (solidCorners.length > 0) {
+          const nearest = Math.min(...solidCorners.map((z) => Math.abs(z + wallZ)));
+          candidates.push([nearest, '右舷舱壁']);
+        }
         for (const [gap, name] of candidates) {
           if (gap < clearance) {
             clearance = gap;

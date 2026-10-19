@@ -171,8 +171,9 @@ export interface AgvRole {
 }
 
 /**
- * AGV 角色与待命位：全部在**前舱门外平台**沿 Z 方向排队待命（车头朝舱门 +Z），
- * 收到任务后货物直接装到车上，再驶入舱内入位；退出时原路倒车退出。
+ * AGV 角色与待命位：全部在前舱门外平台，**沿门洞宽度方向并排**待命（车头朝舱门 +Z）。
+ * 为什么并排而不是前后排：两台车若在同一条进出线上，后车出库必然从候车车里穿过去。
+ * 并排后各自进出互不占位（间距 1.4 m，车宽 1.1 m，留 0.3 m 余量）。
  */
 export function agvRoles(config: CargoConfig): AgvRole[] {
   const roles: AgvRole[] = [];
@@ -180,10 +181,12 @@ export function agvRoles(config: CargoConfig): AgvRole[] {
   const doorX = config.doors.forward.x;
   const dock = dockPose(config);
   for (let i = 0; i < count; i += 1) {
+    // 以门洞中心对称排布；间距按门洞宽度限制，保证所有待命位都在门洞投影内（≤±0.75 m）。
+    const step = count > 1 ? Math.min(1.4, 1.5 / (count - 1)) : 0;
+    const offset = (i - (count - 1) / 2) * step;
     roles.push({
       id: `AGV-${String(i + 1).padStart(2, '0')}`,
-      // 沿舱外平台深度方向排队（z 越大越靠近舱门），车头统一朝 +Z（yaw=-π/2）。
-      home: { x: doorX, y: 0, z: dock.z - i * 2.4, yaw: dock.yaw },
+      home: { x: doorX + offset, y: 0, z: dock.z, yaw: dock.yaw },
       roleLabel: '舱外待命 · 前舱门装卸'
     });
   }
