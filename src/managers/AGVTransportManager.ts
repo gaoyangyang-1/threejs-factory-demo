@@ -68,8 +68,8 @@ interface AGVRuntime extends AGVRuntimeOptions {
 const ARRIVE_DIST = 0.2;
 const ARRIVE_DIST_REVERSE = 0.55;
 const ARRIVE_YAW = 0.06;
-/** 倒车速度系数：倒车比前进更难精确跟踪，降速保证能停在航点附近。 */
-const REVERSE_SPEED_SCALE = 0.6;
+/** 倒车速度系数：与前进同速（倒车也用巡航速度，避免"退得很慢"）。 */
+const REVERSE_SPEED_SCALE = 1;
 /** 最小转弯半径（m）：AGV 只能边走边转，不允许原地掉头。 */
 const TURN_RADIUS = 1.2;
 /** 航向跟踪增益（越大越"贴"目标航向，但受转弯半径限幅）。 */

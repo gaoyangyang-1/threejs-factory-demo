@@ -36,7 +36,7 @@
         </div>
         <div class="dispatch-actions">
           <button class="c-btn primary" :disabled="!store.canDispatch" @click="dispatch">下发任务</button>
-          <span class="hint dim">启动系统且空闲时方可下发</span>
+          <span class="hint dim">任务执行中也可以继续下发，新任务自动排队</span>
         </div>
       </section>
 

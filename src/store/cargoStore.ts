@@ -141,7 +141,8 @@ export const useCargoStore = defineStore('cargo', {
       });
     },
     canDispatch(state): boolean {
-      return state.connected && state.runState === 'running' && this.activeTaskCount === 0 && this.freeSlotCount > 0;
+      // 任务执行中同样允许继续下发（新任务进入队列，由编排源排队执行）。
+      return state.connected && state.runState === 'running' && this.freeSlotCount > 0;
     }
   },
   actions: {

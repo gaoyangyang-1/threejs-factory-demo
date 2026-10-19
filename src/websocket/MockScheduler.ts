@@ -301,8 +301,12 @@ export class MockScheduler {
       // 4) 退出：倒车退出货位 + 正向驶出舱门，**一次性连续下发**（中间不停顿、不等待）。
       this.emitAgv(agvId, { phase: 'done', taskId, cargoId: null, cargoType: null });
       const laneX = frontLaneX(cfg);
-      const lanePoint: Pose3 = { x: laneX, y: 0, z: target.z, yaw: 0 };
-      const exitPath = this.routeForwardExit(cfg, home, laneX, target.z);
+      // 倒车目标点必须落在"车的后方"（更靠机头一侧的空场）：
+      // 若目标列很靠前，stopX 可能已在 laneX 之前，此时取 stopX-0.6 才不会让车反向往舱尾倒退。
+      const stopX = target.x - PLACE_PUSH;
+      const backX = Math.min(laneX, stopX - 0.6);
+      const lanePoint: Pose3 = { x: backX, y: 0, z: target.z, yaw: 0 };
+      const exitPath = this.routeForwardExit(cfg, home, backX, target.z);
       const legs = [
         { pose: lanePoint, reverse: true },
         ...exitPath.map((pose) => ({ pose, reverse: false }))
